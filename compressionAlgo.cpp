@@ -113,6 +113,11 @@ void maximizeConsoleWindow() {
 // Global Structs
 //----------------------------------------------------------------------------------
 
+struct Line {
+    std::string text;
+    Align alignment = Align::LEFT;
+};
+
 struct SymbolEntry {
     uint16_t wordId;
     std::vector<uint16_t> positions;
@@ -183,14 +188,6 @@ struct TransitionStream {
     std::vector<TransitionEntry> transitions;
 };
 
-struct RiceHeader {
-    uint8_t k            = 0;
-    uint32_t bitCount    = 0;
-    uint32_t symbolCount = 0;
-    std::vector<uint8_t> payload;           // packed bytes (post bit-packing)
-    std::vector<uint8_t> serialisedPayload; // serialised header+payload buffer
-};
-
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
@@ -235,7 +232,6 @@ struct CompressionState {
     std::vector<uint8_t> run;
     HuffmanResults hashGapCanonical;
     HuffmanResults hashGapCanonicalDouble;
-    RiceHeader hashGapRice;
     std::string footerPacked;
     std::string footerCodec;
 
@@ -336,6 +332,203 @@ class FileSystem {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 // Functions
+//----------------------------------------------------------------------------------
+
+class Render {
+  public:
+    void pushLine(const std::string &txt, Align a = Align::LEFT) { bufferedLines.push_back({txt, a}); }
+
+    void flushToColumn(std::vector<Line> &column) {
+        column.insert(column.end(), bufferedLines.begin(), bufferedLines.end());
+        bufferedLines.clear();
+    }
+
+    void clearBuffer() { bufferedLines.clear(); }
+
+    void addEmptyLines(std::vector<Line> &col, int n) {
+        for (int i = 0; i < n; ++i)
+            col.push_back({"", Align::CENTER});
+    }
+
+    std::string makeLine(char c = '=') const { return std::string(consoleWidth(), c); }
+
+    std::string printColumns(const std::vector<std::vector<Line>> &columns, int spacing = 1, int padding = 0, int widthOverride = 0) const {
+        const int cw           = widthOverride > 0 ? widthOverride : consoleWidth();
+        const int numCols      = (int)std::max<size_t>(1, columns.size());
+        const int totalSpacing = spacing * (numCols - 1);
+        const int usableWidth  = cw - (padding * 2) - totalSpacing;
+        const int colWidth     = std::max(1, usableWidth / numCols);
+        const std::string leftPad(std::max(0, (cw - (colWidth * numCols + totalSpacing + padding * 2)) / 2), ' ');
+
+        std::vector<std::vector<std::string>> wrappedText(numCols);
+        std::vector<std::vector<Align>> wrappedAlign(numCols);
+
+        for (int c = 0; c < numCols; ++c) {
+            for (const auto &ln : columns[c]) {
+                auto &wt = wrappedText[c];
+                auto &wa = wrappedAlign[c];
+
+                if (ln.text.find_first_not_of(" \t\r\n") == std::string::npos) {
+                    wt.push_back("");
+                    wa.push_back(ln.alignment);
+                    continue;
+                }
+
+                if ((int)ln.text.size() <= colWidth) {
+                    wt.push_back(ln.text);
+                    wa.push_back(ln.alignment);
+                    continue;
+                }
+
+                std::istringstream iss(ln.text);
+                std::string word, current;
+
+                while (iss >> word) {
+                    if (current.empty()) {
+                        current = word;
+                    } else if ((int)(current.size() + 1 + word.size()) <= colWidth) {
+                        current += ' ' + word;
+                    } else {
+                        wt.push_back(current);
+                        wa.push_back(ln.alignment);
+                        current = word;
+                    }
+                }
+
+                if (!current.empty()) {
+                    wt.push_back(current);
+                    wa.push_back(ln.alignment);
+                }
+            }
+        }
+
+        size_t maxLines = 0;
+        for (const auto &col : wrappedText)
+            maxLines = std::max(maxLines, col.size());
+
+        std::ostringstream oss;
+        for (size_t i = 0; i < maxLines; ++i) {
+            oss << leftPad;
+            for (int c = 0; c < numCols; ++c) {
+                const std::string &text = i < wrappedText[c].size() ? wrappedText[c][i] : "";
+                const Align a           = i < wrappedAlign[c].size() ? wrappedAlign[c][i] : Align::LEFT;
+                oss << alignFragment(text, a, colWidth);
+                if (c < numCols - 1)
+                    oss << std::string(spacing, ' ');
+            }
+            oss << '\n';
+        }
+
+        return oss.str();
+    }
+
+    // clang-format off
+        std::string printHeaderColumns   (const std::vector<std::vector<Line>> &cols) const { return printColumns(cols, 0, 0); }
+        std::string printMenuColumns     (const std::vector<std::vector<Line>> &cols) const { return printColumns(cols, 1, 0); }
+        std::string printBodyColumns     (const std::vector<std::vector<Line>> &cols) const { return printColumns(cols, 2, 0); }
+        //std::string printIndicatorColumns(const std::vector<std::vector<Line>> &cols) const { return printColumns(cols, 2, 0); }
+        std::string printFooterColumns   (const std::vector<std::vector<Line>> &cols) const { return printColumns(cols, 0, 0); }
+        std::string printCalendar        (const std::vector<std::vector<Line>> &cols) const { return printColumns(cols, 1, 0); }
+    // clang-format on
+
+    int consoleWidth() const {
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+        return std::max(1, csbi.srWindow.Right - csbi.srWindow.Left);
+    }
+
+    std::string
+    printColumnsPercent(const std::vector<std::vector<Line>> &columns, const std::vector<double> &percents, int spacing = 1, int padding = 0, int widthOverride = 0) const {
+        const int cw = widthOverride > 0 ? widthOverride : consoleWidth();
+
+        const int numCols = (int)columns.size();
+
+        if ((int)percents.size() != numCols || numCols == 0)
+            return "";
+
+        const int totalSpacing = spacing * (numCols - 1);
+        const int usableWidth  = cw - (padding * 2) - totalSpacing;
+
+        // column widths
+        std::vector<int> colWidths(numCols);
+        int used = 0;
+
+        for (int i = 0; i < numCols; ++i) {
+            colWidths[i] = (int)(usableWidth * (percents[i] / 100.0));
+            used += colWidths[i];
+        }
+
+        colWidths.back() += usableWidth - used;
+
+        // flatten rows per column WITHOUT word wrapping
+        std::vector<std::vector<std::string>> text(numCols);
+        std::vector<std::vector<Align>> align(numCols);
+
+        for (int c = 0; c < numCols; ++c) {
+            for (const auto &ln : columns[c]) {
+                std::string t = ln.text;
+
+                // HARD RULE: no reflow, only cut
+                if ((int)t.size() > colWidths[c])
+                    t = t.substr(0, colWidths[c]);
+
+                text[c].push_back(t);
+                align[c].push_back(ln.alignment);
+            }
+        }
+
+        size_t maxRows = 0;
+        for (const auto &c : text)
+            maxRows = std::max(maxRows, c.size());
+
+        std::ostringstream oss;
+
+        for (size_t r = 0; r < maxRows; ++r) {
+            for (int c = 0; c < numCols; ++c) {
+                std::string t = (r < text[c].size()) ? text[c][r] : "";
+
+                Align a = (r < align[c].size()) ? align[c][r] : Align::LEFT;
+
+                oss << alignFragment(t, a, colWidths[c]);
+
+                if (c < numCols - 1)
+                    oss << std::string(spacing, ' ');
+            }
+
+            oss << '\n';
+        }
+
+        return oss.str();
+    }
+
+  private:
+    std::vector<Line> bufferedLines;
+
+    std::string alignFragment(const std::string &txt, Align a, int width) const {
+        const int len   = (int)txt.size();
+        const int space = width - len;
+
+        if (len >= width)
+            return txt.substr(0, width);
+
+        switch (a) {
+        case Align::LEFT:
+            return txt + std::string(space, ' ');
+        case Align::RIGHT:
+            return std::string(space, ' ') + txt;
+        case Align::CENTER: {
+            const int l = space / 2;
+            return std::string(l, ' ') + txt + std::string(space - l, ' ');
+        }
+        }
+        return txt;
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// File System -- CLASS 1
 //----------------------------------------------------------------------------------
 
 class Functions {
@@ -503,84 +696,9 @@ class Functions {
 
 class SystemClock {
   public:
-    // =========================================================
-    // RAW EPOCH VALUES
-    // =========================================================
-
-    inline long long getSeconds() {
-        auto now = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-    }
-
-    inline long long getMilliseconds() {
-        auto now = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    }
-
-    inline long long getMicroseconds() {
-        auto now = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
-    }
-
     inline long long getNanoseconds() {
         auto now = std::chrono::high_resolution_clock::now();
         return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-    }
-
-    // =========================================================
-    // FORMATTED TIME STRINGS
-    // =========================================================
-
-    // Current local time as "YYYY-MM-DD HH:MM:SS.mmm"
-    std::string getCurrentTime() {
-        auto now = std::chrono::system_clock::now();
-        auto tt  = std::chrono::system_clock::to_time_t(now);
-        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-        std::ostringstream ss;
-        ss << std::put_time(std::localtime(&tt), "%Y-%m-%d %H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms.count();
-        return ss.str();
-    }
-
-    // Today's local date as "YYYY-MM-DD"
-    static std::string getTodayDate() {
-        std::time_t t = std::time(nullptr);
-        std::tm *now  = std::localtime(&t);
-        char buffer[11];
-        std::strftime(buffer, sizeof(buffer), "%Y-%m-%d", now);
-        return std::string(buffer);
-    }
-
-    // Local date and time as "DD/MM/YYYY HH:MM:SS"
-    static std::string getTimeDate() {
-        std::time_t t = std::time(nullptr);
-        std::tm *now  = std::localtime(&t);
-        char buffer[20];
-        std::strftime(buffer, sizeof(buffer), "%d/%m/%Y %H:%M:%S", now);
-        return std::string(buffer);
-    }
-
-    // Unix seconds → "YYYY-MM-DD HH:MM:SS" (UTC)
-    static std::string timestampToReadable(uint64_t seconds) {
-        auto tp = std::chrono::time_point<std::chrono::system_clock>(std::chrono::seconds(seconds));
-        auto tt = std::chrono::system_clock::to_time_t(tp);
-        std::ostringstream ss;
-        ss << std::put_time(std::gmtime(&tt), "%Y-%m-%d %H:%M:%S");
-        return ss.str();
-    }
-
-    // Unix milliseconds → " - HH:MM:SS.mmm"
-    static std::string formatTimestamp(uint64_t ms) {
-        if (ms == 0)
-            return "";
-        std::chrono::milliseconds dur(ms);
-        std::chrono::system_clock::time_point tp(dur);
-        std::time_t tt = std::chrono::system_clock::to_time_t(tp);
-        std::tm *tm    = std::localtime(&tt);
-        char timeBuf[20];
-        std::strftime(timeBuf, sizeof(timeBuf), " - %H:%M:%S", tm);
-        char finalBuf[30];
-        std::snprintf(finalBuf, sizeof(finalBuf), "%s.%03llu", timeBuf, static_cast<unsigned long long>(ms % 1000));
-        return std::string(finalBuf);
     }
 };
 
@@ -866,41 +984,101 @@ class SHA256 {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Random Number Generator
+// Random Number Generator -- CLASS 6
+//----------------------------------------------------------------------------------
+
+// wrapper around platform-specific "pin memory, prevent swap" calls.
+// used anywhere sensitive data (entropy pools, key material) needs to stay
+// out of swap/pagefile for the lifetime of the object holding it.
+class SecureMemory {
+  public:
+    static inline bool lock(void *ptr, size_t bytes) {
+#ifdef _WIN32
+        return VirtualLock(ptr, bytes) != 0;
+#else
+        return mlock(ptr, bytes) == 0;
+#endif
+    }
+
+    static inline bool unlock(void *ptr, size_t bytes) {
+#ifdef _WIN32
+        return VirtualUnlock(ptr, bytes) != 0;
+#else
+        return munlock(ptr, bytes) == 0;
+#endif
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Random Number Generator -- CLASS 6
 //----------------------------------------------------------------------------------
 
 class RandomNumberGenerator {
   public:
     inline std::string run() {
-        const size_t producingIterations = totalIterations - localBufferSize;
-        const size_t expectedBits        = producingIterations * total;
-
+        // first, reserve enough space for the expected output size to avoid repeated reallocations during string concatenation.
         std::string result;
-        result.reserve(expectedBits);
-
-        // reset state
-        head      = 0;
-        tail      = 0;
-        count     = 0;
-        filled    = false;
-        globalSum = 0;
-        globalAvg = 0;
+        result.reserve(expectedBits); // capacity hint only — see note on expectedBits below, actual output can be slightly longer
+        // one must always reset the state before each run() to ensure that the ring buffer and running averages are fresh for this invocation.
+        resetState();
 
         for (int i = 0; i < totalIterations; ++i) {
+            // apply the most imprtant function - see bellow in private section for more details
             long long duration = countdown();
+            // increment the count of samples, add the duration to the running sum, and compute the new running average.
             ++count;
             globalSum += duration;
-            globalAvg = globalSum / count;
+            globalAvg = globalSum / count; // running average, used as the threshold for this iteration's bit extraction
 
+            // extract 1 bit of raw entropy: was this timing sample above or below the running average?
+            // this is the "jitter" bit — noisy, biased, low-quality on its own, which is why it gets pooled and hashed below
             int bit = duration < globalAvg ? 0 : 1;
 
+            // ring buffer write (push newest bit)
             localBits[tail] = bit;
             tail            = (tail + 1) % localBufferSize;
 
-            if (!filled && tail == localBufferSize - 1)
-                filled = true;
+            // assuming 4 values - 0 equals the point at which the series wraps around, marking the end of the local buffer size.
+            // pushed  1 | ... | head=0 tail=1
+            // pushed  2 | ... | head=0 tail=2
+            // pushed  3 | ... | head=0 tail=3
+            // pushed  4 | ... | head=0 tail=0   <- wrapped! tail went 3 -> (3+1) % 4 = 0
+            // pushed  5 | ... | head=1 tail=1
+            //
+            // how it works, the array is faster to compute, hashLocalBits() later orders the bits for SHA256 to hash
+            // [1, None, None, None]
+            // [1, 2, None, None]
+            // [1, 2, 3, None]
+            // [1, 2, 3, 4]
+            // [5, 2, 3, 4]   <- only slot 0 changed: 1 -> 5
+            // [5, 6, 3, 4]   <- only slot 1 changed: 2 -> 6
+            // [5, 6, 7, 4]   <- only slot 2 changed: 3 -> 7
+            // [5, 6, 7, 8]   <- only slot 3 changed: 4 -> 8
+            //
+            // then we are back to zero, completeing the loop in the fastest time possible
+            // the oldest bit is now at head=0, the newest bit is at tail=0, and the buffer is full.
+            if (!filled) {
+                // buffer isn't full yet — we're still in the initial fill-up phase.
+                if (tail == 0)
+                    filled = true;
+            } else {
+                head = (head + 1) % localBufferSize;
+            }
 
-            if (filled) {
+            // Warm-up runs from i = 0 .. warmupIterations-1: buffer fills (by i = 511)
+            // and globalAvg keeps converging, but nothing is hashed yet.
+            // Once i >= warmupIterations, every remaining iteration hashes —
+            // the buffer is already guaranteed full by then...
+            // Only start emitting digests once we're past the warm-up period.
+            // once full, every iteration represents one full 512-bit sliding window (oldest -> newest),
+            // 512 bits = 2^512 = 64 bytes, which is exactly what SHA-256 expects as input.
+            // this is an astronimcally large number of combinations, so the output is effectively "whitened" and conditioned.
+            // in scientific notation, 2⁵¹² ≈ 1.34 × 10¹⁵⁴ which is a 155 digit long number so large that it is effectively impossible to brute-force or predict.
+            // we now hash it every time we add a bit to the local buffer, remove the first, add the last etc,.
+            // this keeps the output stream continuously fed with fresh digests due to the avalanche effect of SHA256.
+            if (i >= warmupIterations) {
                 result += hashLocalBits();
             }
         }
@@ -909,23 +1087,31 @@ class RandomNumberGenerator {
     }
 
   private:
-    static constexpr const char *CLASS_NAME = "RandomNumberGenerator";
     CRYPTO::SHA256 sha;
     SystemClock systemClock;
 
-    static constexpr int totalIterations    = 1024;
-    static constexpr size_t localBufferSize = 512;
-    static constexpr size_t total           = 256;
-    static constexpr int byte64             = 64;
+    static constexpr int warmupBytes           = 1250;            // warm-up period in bytes, 10,000 bits pass through local buffer
+    static constexpr int warmupIterations      = warmupBytes * 8; // 10,000 bits
+    static constexpr int localBufferSize       = 512;             // ring buffer capacity — holds the last 512 raw entropy bits, hashed together to whiten/condition the output
+    std::array<int, localBufferSize> localBits = {};              // the ring buffer itself — one int (0/1) per bit; array chosen over vector for fixed size + speed
+    static constexpr int total                 = 256;             // SHA-256 digest size in bits — size of each unit of output this class produces
+    static constexpr int byte64                = 64;              // 512 bits (localBufferSize) expressed in bytes — what actually gets fed into SHA256::update()
+    static constexpr int producingIterations   = 512;             // number of hashes emitted after warm-up ends -> 512 * 256 = 131,072 bits in the pool
+    static constexpr int totalIterations       = warmupIterations + producingIterations; // 10,512 — full run length, warm-up + production
+    static constexpr int expectedBits          = producingIterations * total;            // 131,072 bits in bit pool
 
-    std::array<int, localBufferSize> localBits = {};
-    size_t head                                = 0;
-    size_t tail                                = 0;
-    bool filled                                = false;
-    long long globalSum                        = 0;
-    long long globalAvg                        = 0;
-    int count                                  = 0;
+    size_t head         = 0;     // index of the OLDEST live bit in the ring buffer (next to be evicted on write, once full)
+    size_t tail         = 0;     // index of the NEXT WRITE position (where the newest bit goes)
+    bool filled         = false; // latches true once the ring buffer has been fully populated at least once
+    long long globalSum = 0;     // running sum of all timing samples seen so far this run
+    long long globalAvg = 0;     // running average of timing samples — used as the live threshold for bit extraction
+    long long count     = 0;     // number of timing samples taken so far this run (denominator for globalAvg)
 
+    // busy-wait a fixed, tiny amount of work and measure how long it actually took in nanoseconds.
+    // for faster computers, this will be a smaller number; for slower computers, it will be larger.
+    // therefore: the volitile value x = 10 can be changed for x = 100 etc,.
+    // the actual duration is noisy due to CPU/OS scheduling jitter, cache state, thermal throttling, etc —
+    // that jitter is the raw entropy source this whole class is built on.
     inline long long countdown() {
         volatile int x = 10;
         auto start     = systemClock.getNanoseconds();
@@ -936,10 +1122,14 @@ class RandomNumberGenerator {
         return systemClock.getNanoseconds() - start;
     }
 
+    // packs the current 512-bit ring buffer window into 64 bytes (oldest bit first, MSB-first within each byte),
+    // then runs it through SHA-256 to condition/whiten the raw jitter bits into a uniform-looking digest.
     inline std::string hashLocalBits() {
         uint8_t bytes[64] = {0};
 
         for (size_t i = 0; i < localBufferSize; ++i) {
+            // walk the ring starting at head (oldest) and wrapping forward to tail (newest) —
+            // this only reads the correct chronological order because head is now actually maintained above.
             size_t idx = (head + i) % localBufferSize;
             if (localBits[idx]) {
                 bytes[i / 8] |= (1 << (7 - (i % 8)));
@@ -950,61 +1140,59 @@ class RandomNumberGenerator {
 
         return sha.digestBinary();
     }
+
+    // resets all run-scoped state so run() can be called repeatedly and produce independent output each time.
+    // note: localBits itself is intentionally NOT cleared here — it gets fully overwritten during the
+    // fill-up phase of the next run() before filled ever becomes true again, so stale bits never get hashed.
+    void resetState() {
+        head      = 0;
+        tail      = 0;
+        count     = 0;
+        filled    = false;
+        globalSum = 0;
+        globalAvg = 0;
+    }
 };
 
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Binary Entropy Pool
+// Random Number Generator -- CLASS 6
 //----------------------------------------------------------------------------------
 
 class BinaryEntropyPool {
   public:
     BinaryEntropyPool() {
-        bitPool.reserve(POOL_RESERVED); // reserve 200% upfront
-        lockMemory();
-        // refill();
+        bitPool.reserve(POOL_RESERVED);                    // pre-allocate 200% of one refill's worth upfront
+        SecureMemory::lock(bitPool.data(), POOL_RESERVED); // pin the reserved region so it can't be swapped to disk
+        // refill(); // intentionally left disabled — pool starts empty, first get() call triggers the initial fill
     }
 
     ~BinaryEntropyPool() {
-        drain();
-        unlockMemory();
+        drain();                                             // zero out any remaining bits before releasing memory
+        SecureMemory::unlock(bitPool.data(), POOL_RESERVED); // must match the size used in lock() above
     }
 
+    // Fetches bitsNeeded bits, automatically choosing the right strategy:
+    // - <= POOL_CAPACITY (one refill's worth): served directly via get(), fastest path, no chunking overhead.
+    // - >  POOL_CAPACITY: routed to getLarge(), which pulls it in POOL_CAPACITY-sized chunks.
+    // This is the method callers should use by default — get() or getLarge() remain available directly
+    // if you specifically know which strategy you want (e.g. a tight loop issuing many small requests).
     inline std::string get(size_t bitsNeeded) {
-        std::lock_guard<std::mutex> lock(poolMutex);
-
-        if (bitPool.size() < LOW_WATERMARK)
-            refill();
-        while (bitPool.size() < bitsNeeded)
-            refill();
-
-        std::string result = bitPool.substr(0, bitsNeeded);
-        secureErase(bitsNeeded);
-
-        return result;
+        if (bitsNeeded <= POOL_CAPACITY)
+            return requestSmall(bitsNeeded);
+        return requestLarge(bitsNeeded);
     }
 
-    inline std::string getLarge(size_t bitsNeeded) {
-        std::string result;
-        result.reserve(bitsNeeded);
-
-        size_t remaining = bitsNeeded;
-
-        while (remaining > 0) {
-            size_t chunkSize = std::min(remaining, POOL_CAPACITY);
-            result += get(chunkSize);
-            remaining -= chunkSize;
-        }
-
-        return result;
-    }
-
+    // Current number of unconsumed bits sitting in the pool. Mainly for diagnostics/monitoring.
     inline size_t available() const {
         std::lock_guard<std::mutex> lock(poolMutex);
         return bitPool.size();
     }
 
+    // Securely wipes the entire pool and re-reserves capacity for future refills.
+    // Called on destruction, and available to call manually if you need to force-discard
+    // the current pool contents (e.g. suspected compromise, or before a sensitive operation).
     inline void drain() {
         std::lock_guard<std::mutex> lock(poolMutex);
         secureClear(bitPool);
@@ -1013,15 +1201,62 @@ class BinaryEntropyPool {
 
   private:
     RandomNumberGenerator rng;
+    Functions functions;
 
-    static constexpr const char *CLASS_NAME = "BinaryEntropyPool";
-    static constexpr size_t POOL_CAPACITY   = 512 * 256;         // 131,072 bits — one rng.run()
-    static constexpr size_t POOL_RESERVED   = POOL_CAPACITY * 2; // 262,144 bits — 150%
-    static constexpr size_t LOW_WATERMARK   = 512 * 128;         // refill below halfway
+    static constexpr size_t POOL_CAPACITY = 512 * 256;         // intended: 131,072 bits — one rng.run()
+    static constexpr size_t POOL_RESERVED = POOL_CAPACITY * 2; // 262,144 bits — 200% headroom over one refill
+    static constexpr size_t LOW_WATERMARK = 512 * 128;         // refill proactively once below half of POOL_CAPACITY
 
-    std::string bitPool;
-    mutable std::mutex poolMutex;
+    std::string bitPool;          // the pool itself — a flat string of '0'/'1' characters acting as a bit queue
+    mutable std::mutex poolMutex; // guards all reads/writes to bitPool, since get()/available()/drain() can be called from multiple threads
 
+    // Returns exactly bitsNeeded bits, refilling from the RNG first if the pool is running low
+    // or doesn't have enough to satisfy the request. Consumed bits are securely erased from the
+    // pool immediately after being copied out, so they can't linger in memory post-use.
+    inline std::string requestSmall(size_t bitsNeeded) {
+        std::lock_guard<std::mutex> lock(poolMutex); // pool is shared across threads — serialize all access
+
+        if (bitsNeeded > POOL_RESERVED) {
+            throw std::invalid_argument("get(): requested bits exceed pool's maximum single-request capacity — use request() or getLarge() instead");
+        }
+
+        if (bitPool.size() < LOW_WATERMARK)
+            refill(); // proactive top-up once we drop below the halfway mark, before we're actually starved
+        while (bitPool.size() < bitsNeeded)
+            refill(); // reactive top-up — guarantees enough bits exist to satisfy this specific request
+
+        std::string result = bitPool.substr(0, bitsNeeded); // copy out the requested prefix
+        secureErase(bitsNeeded);                            // wipe + remove those bits from the pool so they're one-time-use
+
+        return result;
+    }
+
+    // Same contract as get(), but for requests larger than a single refill's worth (POOL_CAPACITY).
+    // Pulls bits in POOL_CAPACITY-sized chunks via repeated get() calls and concatenates them.
+    inline std::string requestLarge(size_t bitsNeeded) {
+        std::string result;
+        result.reserve(bitsNeeded);
+
+        size_t remaining = bitsNeeded;
+        size_t completed = 0;
+        std::cout << '\n';
+
+        while (remaining > 0) {
+            size_t chunkSize = std::min(remaining, POOL_CAPACITY);
+            result += get(chunkSize);
+            completed += chunkSize;
+            remaining -= chunkSize;
+
+            functions.printProgressBar(completed, bitsNeeded);
+        }
+
+        std::cout << '\n';
+
+        return result;
+    }
+
+    // Unused — getLarge() currently reimplements this chunking loop inline instead of calling this.
+    // Either wire this in or remove it so there's only one chunking implementation to maintain.
     inline std::vector<std::string> getChunked(size_t bitsNeeded) {
         std::vector<std::string> chunks;
 
@@ -1036,8 +1271,23 @@ class BinaryEntropyPool {
         return chunks;
     }
 
-    inline void refill() { bitPool += rng.run(); }
+    inline void refill() {
+        if (bitPool.size() >= POOL_RESERVED)
+            return; // already at max reserved capacity — adding more would force a reallocation, invalidating the memory lock
 
+        std::string fresh = rng.run();
+        size_t room       = POOL_RESERVED - bitPool.size();
+
+        if (fresh.size() > room)
+            fresh.resize(room); // trim to whatever room remains — wastes some freshly-generated entropy bits, but that's a far cheaper cost than an unlocked buffer
+
+        bitPool += fresh;
+    }
+
+    // Overwrites every byte of the given string with 0 before clearing it, so freed/reused
+    // memory doesn't retain the old bit pattern. volatile prevents the compiler from optimizing
+    // this "pointless-looking" write-then-discard away — a plain loop without volatile could
+    // legally be eliminated entirely by the optimizer since the values are never read afterward.
     inline void secureClear(std::string &s) {
         volatile char *p = s.data();
         for (size_t i = 0; i < s.size(); ++i)
@@ -1045,27 +1295,13 @@ class BinaryEntropyPool {
         s.clear();
     }
 
+    // Same secure-wipe technique as secureClear(), but only for the first n bits/chars —
+    // used by get() to destroy just the bits that were handed out, leaving the rest of the pool intact.
     inline void secureErase(size_t n) {
         volatile char *p = bitPool.data();
         for (size_t i = 0; i < n; ++i)
             p[i] = 0;
         bitPool.erase(0, n);
-    }
-
-    inline void lockMemory() {
-#ifdef _WIN32
-        VirtualLock(bitPool.data(), POOL_RESERVED);
-#else
-        mlock(bitPool.data(), POOL_RESERVED);
-#endif
-    }
-
-    inline void unlockMemory() {
-#ifdef _WIN32
-        VirtualUnlock(bitPool.data(), POOL_CAPACITY);
-#else
-        munlock(bitPool.data(), POOL_CAPACITY);
-#endif
     }
 };
 
@@ -5571,361 +5807,468 @@ class Commands {
         cmdLog.push_back("--------------- Commands --------------");
         cmdLog.push_back("  /compression          (h)");
         cmdLog.push_back("---------------------------------------");
-    };
+    }
+};
 
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    // Main -- CLASS 18
-    //----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Main -- CLASS 18
+//----------------------------------------------------------------------------------
 
-    class CompressionPage {
-      public:
-        void init(CompressionState &state, std::vector<std::string> &cmdLog) {
-            state.reset();
-            cmdLog.push_back("Compression page opened.");
-        }
+class CompressionPage {
+  public:
+    void init(CompressionState &state, std::vector<std::string> &cmdLog) {
+        state.reset();
+        cmdLog.push_back("Compression page opened.");
+    }
 
-        std::vector<std::string> buildUI(const CompressionState &state, int w, int h) const {
-            const int boxW    = 90;
-            const int padLeft = std::max(0, (w - boxW) / 2);
+    std::vector<std::string> buildUI(const CompressionState &state, int w, int h) const {
+        const int boxW    = 90;
+        const int padLeft = std::max(0, (w - boxW) / 2);
 
-            const std::string indent(padLeft, ' ');
-            const std::string border(boxW, '=');
+        const std::string indent(padLeft, ' ');
+        const std::string border(boxW, '=');
 
-            auto center = [&](const std::string &text) {
-                const int pad = std::max(0, (w - (int)text.size()) / 2);
-                return std::string(pad, ' ') + text;
-            };
-
-            std::vector<std::string> content;
-
-            content.emplace_back(indent + border);
-            content.emplace_back(center("COMPRESSION TERMINAL"));
-            content.emplace_back(indent + border);
-            content.emplace_back("");
-
-            if (state.statusLines.empty()) {
-                content.emplace_back(indent + "  (no activity yet)");
-            } else {
-                for (const auto &line : state.statusLines)
-                    content.emplace_back(indent + "  " + line);
-            }
-
-            content.emplace_back("");
-            content.emplace_back(indent + border);
-
-            switch (state.stage) {
-            case CompressionState::Stage::MENU:
-                content.emplace_back(indent + "  1. Enter text manually");
-                content.emplace_back(indent + "  2. Load poem.txt");
-                content.emplace_back(indent + "  3. Load KingJamesBible.txt");
-                content.emplace_back(indent + "  4. Run full 256-byte sweep");
-                content.emplace_back(indent + "  0. Back");
-                break;
-            case CompressionState::Stage::AWAITING_TEXT:
-                content.emplace_back(indent + "  Type the text you want to compress, then press Enter.");
-                break;
-            case CompressionState::Stage::DECODE_PROMPT:
-                content.emplace_back(indent + "  Decode a record now? (y/n)");
-                break;
-            }
-
-            content.emplace_back(indent + border);
-
-            std::vector<std::string> lines;
-            const int topPad = std::max(0, (h - (int)content.size()) / 3);
-
-            for (int i = 0; i < topPad; ++i)
-                lines.emplace_back("");
-
-            for (const auto &line : content)
-                lines.emplace_back(line);
-
-            return lines;
-        }
-
-      private:
-        static constexpr const char *CLASS_NAME = "CompressionPage";
-    };
-
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    // Main -- CLASS 18
-    //----------------------------------------------------------------------------------
-
-    struct ServicesUI {
-        // Compression algorithms
-        CompressionState compressionState{};
-        Operations operations{};
-        TextEncoding textEncoding{};
-        Database compressionDatabase{};
-        XORCypher xorCypher{};
-        EncodingRouter encodingRouter{};
-        LayeredCompression layeredCompression;
-        ServicesCompression servicesCompression;
-        Compression compression;
-
-        // UI command handlers
-        DatabaseCommands databaseCommands;
-        CompressionCommands compressionCommands;
-        Commands commands;
-        Output output;
-
-        // Pages
-        CompressionPage compressionPage;
-
-        , databaseCommands(fileSystem), commands(services, compressionCommands)
-
-                                            ,
-            compressionState(), compressionPage(), compressionCommands(compressionState, servicesCompression, compression), databasePage(fileSystem) {}
-    };
-
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    // Main -- CLASS 18
-    //----------------------------------------------------------------------------------
-
-    class UserInterface {
-      public:
-        explicit UserInterface(ServicesUI &services)
-            : services(services) {}
-
-        ~UserInterface() {
-            services.uiRunning.store(false, std::memory_order_release);
-            join();
-        }
-
-        void startOnThread() { uiThread = std::thread(&UserInterface::run, this); }
-
-        void join() {
-            if (uiThread.joinable())
-                uiThread.join();
-        }
-
-        void run() {
-            windowsUtilities.enableAnsiEscapes();
-            windowsUtilities.fitBufferToWindow();
-            windowsUtilities.hideCursor();
-
-            std::ios::sync_with_stdio(false);
-            std::cin.tie(nullptr);
-
-            constexpr int FPS     = 30;
-            const auto FRAME_TIME = std::chrono::milliseconds(1000 / FPS);
-            int iterationCount    = 0;
-            double fps            = 0.0;
-            using Clock           = std::chrono::high_resolution_clock;
-            auto lastFrameTime    = Clock::now();
-            std::string commandInput;
-
-            std::cout << "\033[3J\033[2J\033[H";
-            std::cout.flush();
-
-            while (services.uiRunning.load(std::memory_order_acquire)) {
-                ++iterationCount;
-
-                auto frameStart = Clock::now();
-                double elapsed  = std::chrono::duration<double>(frameStart - lastFrameTime).count();
-                fps             = elapsed > 0.0 ? 1.0 / elapsed : 0.0;
-                lastFrameTime   = frameStart;
-
-                // ── Input ─────────────────────────────────────────────────────────
-                while (_kbhit()) {
-                    char c = _getch();
-                    if (c == '\r') {
-
-                        if (!commandInput.empty()) {
-                            if (commandInput == "/exit" || commandInput == "/quit") {
-                                cmdLog.push_back("[<] Shutting down...");
-                                services.uiRunning.store(false, std::memory_order_release);
-                                services.tradingLoop.setTrading(false);
-                                services.encryptedFileSystem.lock();
-                                std::this_thread::sleep_for(std::chrono::seconds(2));
-                                commandInput.clear();
-                                continue;
-                            }
-                            bool handled = services.commands.handle(commandInput, cmdLog, body);
-                            if (!handled)
-                                body.push_back("> " + commandInput);
-                            commandInput.clear();
-                        }
-
-                    } else if (c == '\b') {
-                        if (!commandInput.empty())
-                            commandInput.pop_back();
-                    } else {
-                        commandInput += c;
-                    }
-                }
-
-                // ── Layout ────────────────────────────────────────────────────────
-                auto [W, H] = getConsoleSize();
-
-                constexpr int TOP_EMPTY = 1;
-                constexpr int HEADER    = 5;
-                constexpr int CMD       = 2;
-                constexpr int FOOTER    = 3;
-
-                const int BODY_SIZE = std::max(0, H - (TOP_EMPTY + HEADER + CMD + FOOTER));
-                const int SIDEBAR_W = 40;
-                const int MAIN_W    = W - SIDEBAR_W - 1;
-                const int CHART_H   = std::max(3, BODY_SIZE);
-
-                while ((int)cmdLog.size() > BODY_SIZE)
-                    cmdLog.erase(cmdLog.begin());
-
-                // ── Build frame ───────────────────────────────────────────────────
-                std::ostringstream frame;
-                frame << "\033[K\n";
-                frame << services.output.buildHeader(iterationCount, fps);
-
-                bool renderMain = true;
-
-                // ── Main app pages ────────────────────────────────────────────────
-                if (renderMain) {
-                    switch (services.uiState.currentPage) {
-
-                    case Page::COMPRESSOR:
-                        frame << buildBody(cmdLog, services.compressionPage.buildUI(services.compressionState, MAIN_W, BODY_SIZE), BODY_SIZE, W, SIDEBAR_W, true);
-                        break;
-                    }
-
-                    frame << services.output.buildCommandLine(commandInput, W);
-                    frame << services.output.buildFooter(services.authPage.pendingUsername, services.authPage.loginTime, services.authPage.lastLoginTime);
-
-                    std::string frameText = frame.str();
-                    if (!frameText.empty() && frameText.back() == '\n')
-                        frameText.pop_back();
-
-                    std::cout << "\033[H" << frameText;
-                    std::cout.flush();
-
-                    // ── Frame-rate cap ────────────────────────────────────────────────
-                    auto renderElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - frameStart);
-                    if (renderElapsed < FRAME_TIME)
-                        std::this_thread::sleep_for(FRAME_TIME - renderElapsed);
-                }
-
-                windowsUtilities.showCursor();
-                std::cout << "\033[0m\033[2J\033[H";
-                std::cout << "[<] Exiting the program...\n";
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-                std::cout.flush();
-            }
-
-          private:
-            ServicesUI & services;
-            WindowsUtilities windowsUtilities;
-            std::thread uiThread;
-
-            std::vector<std::string> body;
-            std::vector<std::string> cmdLog;
-
-            std::vector<std::string> expandLines(const std::vector<std::string> &entries, int colW) {
-                std::vector<std::string> lines;
-                for (const auto &entry : entries) {
-                    std::istringstream iss(entry);
-                    std::string seg;
-                    while (std::getline(iss, seg)) {
-                        if ((int)seg.size() <= colW)
-                            lines.push_back(seg);
-                        else
-                            for (int pos = 0; pos < (int)seg.size(); pos += colW)
-                                lines.push_back(seg.substr(pos, colW));
-                    }
-                }
-                return lines;
-            }
-
-            std::string buildBody(const std::vector<std::string> &sidebar,
-                                  const std::vector<std::string> &main,
-                                  int BODY_SIZE,
-                                  int w,
-                                  int sidebarW,
-                                  bool rawMain                                      = false,
-                                  const std::vector<std::vector<Line>> *mainColumns = nullptr,
-                                  const std::vector<double> *percents               = nullptr,
-                                  bool usePercentColumns                            = false) {
-
-                const int dividerW = sidebarW > 0 ? 1 : 0;
-                const int mainW    = w - sidebarW - dividerW;
-
-                std::vector<std::string> sideLines = expandLines(sidebar, sidebarW);
-                while ((int)sideLines.size() > BODY_SIZE)
-                    sideLines.erase(sideLines.begin());
-
-                std::vector<std::string> mainLines;
-
-                if (mainColumns && usePercentColumns && percents) {
-                    std::string rendered = services.render.printColumnsPercent(*mainColumns, *percents, 2, 0, mainW);
-                    mainLines            = services.accountingPage.splitLines(rendered);
-                } else if (mainColumns) {
-                    std::string rendered = services.render.printColumns(*mainColumns, 2, 0, mainW);
-                    mainLines            = services.accountingPage.splitLines(rendered);
-                } else if (rawMain) {
-                    mainLines = main;
-                } else {
-                    mainLines = expandLines(main, mainW);
-                }
-
-                while ((int)mainLines.size() > BODY_SIZE)
-                    mainLines.erase(mainLines.begin());
-
-                std::ostringstream out;
-                for (int i = 0; i < BODY_SIZE; ++i) {
-                    const std::string &s = i < (int)sideLines.size() ? sideLines[i] : "";
-                    const std::string &m = i < (int)mainLines.size() ? mainLines[i] : "";
-
-                    if (sidebarW > 0) {
-                        out << s << std::string(std::max(0, sidebarW - (int)s.size()), ' ');
-                        out << '|';
-                    }
-
-                    if (rawMain || mainColumns)
-                        out << ((int)m.size() > mainW ? m.substr(0, mainW) : m + std::string(std::max(0, mainW - (int)m.size()), ' '));
-                    else
-                        out << m << std::string(std::max(0, mainW - (int)m.size()), ' ');
-
-                    out << "\033[K\n";
-                }
-                return out.str();
-            }
+        auto center = [&](const std::string &text) {
+            const int pad = std::max(0, (w - (int)text.size()) / 2);
+            return std::string(pad, ' ') + text;
         };
 
-        //----------------------------------------------------------------------------------
-        //----------------------------------------------------------------------------------
-        //----------------------------------------------------------------------------------
-        // Main -- CLASS 18
-        //----------------------------------------------------------------------------------
+        std::vector<std::string> content;
 
-        int main() {
-            WindowsUtilities windowsUtilities;
-#ifdef _WIN32
-            SetConsoleOutputCP(CP_UTF8);
-            SetConsoleCP(CP_UTF8);
-            windowsUtilities.maximizeConsoleWindow();
-            SetConsoleTitle(TEXT("Jacquard's Loom"));
-#endif
+        content.emplace_back(indent + border);
+        content.emplace_back(center("COMPRESSION TERMINAL"));
+        content.emplace_back(indent + border);
+        content.emplace_back("");
 
-            ServicesUI services;
-            services.fileSystem.bootstrapGlobal();
-
-            // startup
-            UserInterface ui(services);
-            ui.startOnThread();
-            ui.join();
-
-            // shutdown
-            services.tradingLoop.stop();
-
-            return 0;
+        if (state.statusLines.empty()) {
+            content.emplace_back(indent + "  (no activity yet)");
+        } else {
+            for (const auto &line : state.statusLines)
+                content.emplace_back(indent + "  " + line);
         }
 
-        //----------------------------------------------------------------------------------
-        //----------------------------------------------------------------------------------
-        //----------------------------------------------------------------------------------
-        // Main
-        //----------------------------------------------------------------------------------
+        content.emplace_back("");
+        content.emplace_back(indent + border);
+
+        switch (state.stage) {
+        case CompressionState::Stage::MENU:
+            content.emplace_back(indent + "  1. Enter text manually");
+            content.emplace_back(indent + "  2. Load poem.txt");
+            content.emplace_back(indent + "  3. Load KingJamesBible.txt");
+            content.emplace_back(indent + "  4. Run full 256-byte sweep");
+            content.emplace_back(indent + "  0. Back");
+            break;
+        case CompressionState::Stage::AWAITING_TEXT:
+            content.emplace_back(indent + "  Type the text you want to compress, then press Enter.");
+            break;
+        case CompressionState::Stage::DECODE_PROMPT:
+            content.emplace_back(indent + "  Decode a record now? (y/n)");
+            break;
+        }
+
+        content.emplace_back(indent + border);
+
+        std::vector<std::string> lines;
+        const int topPad = std::max(0, (h - (int)content.size()) / 3);
+
+        for (int i = 0; i < topPad; ++i)
+            lines.emplace_back("");
+
+        for (const auto &line : content)
+            lines.emplace_back(line);
+
+        return lines;
+    }
+
+  private:
+    static constexpr const char *CLASS_NAME = "CompressionPage";
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Binary Entropy Pool -- CLASS 7
+//----------------------------------------------------------------------------------
+
+class Output {
+  public:
+    explicit Output(Services &services, Commands &cmds, TradingLoop &tradingLoop)
+        : services(services)
+        , commands(cmds)
+        , tradingLoop(tradingLoop) {}
+
+    std::string buildBar(int w = 0) {
+        if (w <= 0)
+            w = services.render.consoleWidth();
+        return std::string(w, '=') + "\033[K\n";
+    }
+
+    std::string buildHeader(int iterationCount, double fps) {
+        std::vector<Line> row1a, row1b, row1c;
+        std::vector<Line> row2a, row2b, row2c;
+
+        uint64_t currentPrice = tradingLoop.getCurrentPrice();
+
+        row1a.emplace_back("BTC" /*services.enumFuncs.buildCurrencyPair(market.key.pair)*/, Align::CENTER);
+        row1b.emplace_back("--- " + commands.pageName() + " ---", Align::CENTER);
+        row1c.emplace_back(/*services.enumFuncs.exchangeToString(market.key.exchange)*/ " EXCHANGE", Align::CENTER);
+
+        row2a.emplace_back("Iteration: " + std::to_string(iterationCount) + "  FPS: " + std::to_string((int)fps), Align::CENTER);
+        row2b.emplace_back("Price: $" + formatPrice(currentPrice), Align::CENTER);
+        row2c.emplace_back("Date: " + services.systemClock.getCurrentTime(), Align::CENTER);
+
+        std::ostringstream out;
+        out << buildBar();
+        out << services.render.printHeaderColumns({row1a, row1b, row1c});
+        out << buildBar();
+        out << services.render.printHeaderColumns({row2a, row2b, row2c});
+        out << buildBar();
+        return out.str();
+    }
+
+    std::string buildCommandLine(const std::string &input, int w) {
+        std::ostringstream out;
+        out << std::string(w, '=') << "\033[K\n";
+        out << "[>] Command Line: " << input << "_\033[K\n";
+        return out.str();
+    }
+
+    std::string buildFooter(const std::string &userName, const std::string &loginTime, const std::string &lastLoginTime) {
+        Side side = tradingLoop.getTradeDecision();
+        std::vector<Line> f1, f2, f3, f4, f5;
+
+        f1.emplace_back("User: " + userName, Align::CENTER);
+        f2.emplace_back("Login time: " + loginTime, Align::CENTER);
+        f3.emplace_back("Last login: " + lastLoginTime, Align::CENTER);
+        f4.emplace_back("Direction: " + services.enumFuncs.tradeTypeToString(side), Align::CENTER);
+        f5.emplace_back(std::string("Version: ") + CLIENT_VERSION, Align::CENTER);
+
+        std::ostringstream out;
+        out << buildBar();
+        out << services.render.printFooterColumns({f1, f2, f3, f4, f5});
+        out << buildBar();
+        return out.str();
+    }
+
+    std::string buildPageHome(int w) {
+        std::ostringstream out;
+
+        auto center = [&](const std::string &txt) {
+            if (txt.empty())
+                return std::string("\n");
+            int pad = std::max(0, (w - (int)txt.size()) / 2);
+            return std::string(pad, ' ') + txt + "\n";
+        };
+
+        out << center("=== TRADE TERMINAL ===");
+        out << center("");
+        out << center("PAGES");
+        out << center("");
+        out << center("/compression");
+        out << center("");
+        out << center("COMMANDS");
+        out << center("");
+        out << center("/back");
+
+        out << center("");
+        out << center("Type any command starting with / to navigate.");
+
+        return out.str();
+    }
+
+  private:
+    Services &services;
+    Commands &commands;
+    TradingLoop &tradingLoop;
+
+    static std::string formatPrice(uint64_t cents) {
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(2) << (static_cast<double>(cents) / 100.0);
+        return ss.str();
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Main -- CLASS 18
+//----------------------------------------------------------------------------------
+
+struct ServicesUI {
+    // Compression algorithms
+    CompressionState compressionState{};
+    Operations operations{};
+    TextEncoding textEncoding{};
+    Database compressionDatabase{};
+    XORCypher xorCypher{};
+    EncodingRouter encodingRouter{};
+    LayeredCompression layeredCompression;
+    ServicesCompression servicesCompression;
+    Compression compression;
+
+    // UI command handlers
+    DatabaseCommands databaseCommands;
+    CompressionCommands compressionCommands;
+    Commands commands;
+    Output output;
+
+    // Pages
+    CompressionPage compressionPage;
+
+    ServicesUI {
+        , databaseCommands(fileSystem), commands(services, compressionCommands), compressionState(), compressionPage(),
+            compressionCommands(compressionState, servicesCompression, compression), databasePage(fileSystem) {}
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Main -- CLASS 18
+//----------------------------------------------------------------------------------
+
+class UserInterface {
+  public:
+    explicit UserInterface(ServicesUI &services)
+        : services(services) {}
+
+    ~UserInterface() {
+        services.uiRunning.store(false, std::memory_order_release);
+        join();
+    }
+
+    void startOnThread() { uiThread = std::thread(&UserInterface::run, this); }
+
+    void join() {
+        if (uiThread.joinable())
+            uiThread.join();
+    }
+
+    void run() {
+        windowsUtilities.enableAnsiEscapes();
+        windowsUtilities.fitBufferToWindow();
+        windowsUtilities.hideCursor();
+
+        std::ios::sync_with_stdio(false);
+        std::cin.tie(nullptr);
+
+        constexpr int FPS     = 30;
+        const auto FRAME_TIME = std::chrono::milliseconds(1000 / FPS);
+        int iterationCount    = 0;
+        double fps            = 0.0;
+        using Clock           = std::chrono::high_resolution_clock;
+        auto lastFrameTime    = Clock::now();
+        std::string commandInput;
+
+        std::cout << "\033[3J\033[2J\033[H";
+        std::cout.flush();
+
+        while (services.uiRunning.load(std::memory_order_acquire)) {
+            ++iterationCount;
+
+            auto frameStart = Clock::now();
+            double elapsed  = std::chrono::duration<double>(frameStart - lastFrameTime).count();
+            fps             = elapsed > 0.0 ? 1.0 / elapsed : 0.0;
+            lastFrameTime   = frameStart;
+
+            // ── Input ─────────────────────────────────────────────────────────
+            while (_kbhit()) {
+                char c = _getch();
+                if (c == '\r') {
+
+                    if (!commandInput.empty()) {
+                        if (commandInput == "/exit" || commandInput == "/quit") {
+                            cmdLog.push_back("[<] Shutting down...");
+                            services.uiRunning.store(false, std::memory_order_release);
+                            services.tradingLoop.setTrading(false);
+                            services.encryptedFileSystem.lock();
+                            std::this_thread::sleep_for(std::chrono::seconds(2));
+                            commandInput.clear();
+                            continue;
+                        }
+                        bool handled = services.commands.handle(commandInput, cmdLog, body);
+                        if (!handled)
+                            body.push_back("> " + commandInput);
+                        commandInput.clear();
+                    }
+
+                } else if (c == '\b') {
+                    if (!commandInput.empty())
+                        commandInput.pop_back();
+                } else {
+                    commandInput += c;
+                }
+            }
+
+            // ── Layout ────────────────────────────────────────────────────────
+            auto [W, H] = getConsoleSize();
+
+            constexpr int TOP_EMPTY = 1;
+            constexpr int HEADER    = 5;
+            constexpr int CMD       = 2;
+            constexpr int FOOTER    = 3;
+
+            const int BODY_SIZE = std::max(0, H - (TOP_EMPTY + HEADER + CMD + FOOTER));
+            const int SIDEBAR_W = 40;
+            const int MAIN_W    = W - SIDEBAR_W - 1;
+            const int CHART_H   = std::max(3, BODY_SIZE);
+
+            while ((int)cmdLog.size() > BODY_SIZE)
+                cmdLog.erase(cmdLog.begin());
+
+            // ── Build frame ───────────────────────────────────────────────────
+            std::ostringstream frame;
+            frame << "\033[K\n";
+            frame << services.output.buildHeader(iterationCount, fps);
+
+            bool renderMain = true;
+
+            // ── Main app pages ────────────────────────────────────────────────
+            if (renderMain) {
+                switch (services.uiState.currentPage) {
+
+                case Page::COMPRESSOR:
+                    frame << buildBody(cmdLog, services.compressionPage.buildUI(services.compressionState, MAIN_W, BODY_SIZE), BODY_SIZE, W, SIDEBAR_W, true);
+                    break;
+                }
+
+                frame << services.output.buildCommandLine(commandInput, W);
+                frame << services.output.buildFooter(services.authPage.pendingUsername, services.authPage.loginTime, services.authPage.lastLoginTime);
+
+                std::string frameText = frame.str();
+                if (!frameText.empty() && frameText.back() == '\n')
+                    frameText.pop_back();
+
+                std::cout << "\033[H" << frameText;
+                std::cout.flush();
+
+                // ── Frame-rate cap ────────────────────────────────────────────────
+                auto renderElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - frameStart);
+                if (renderElapsed < FRAME_TIME) {
+                    std::this_thread::sleep_for(FRAME_TIME - renderElapsed);
+                }
+            }
+
+            windowsUtilities.showCursor();
+            std::cout << "\033[0m\033[2J\033[H";
+            std::cout << "[<] Exiting the program...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::cout.flush();
+        }
+    }
+
+  private:
+    ServicesUI &services;
+    WindowsUtilities windowsUtilities;
+    std::thread uiThread;
+
+    std::vector<std::string> body;
+    std::vector<std::string> cmdLog;
+
+    std::vector<std::string> expandLines(const std::vector<std::string> &entries, int colW) {
+        std::vector<std::string> lines;
+        for (const auto &entry : entries) {
+            std::istringstream iss(entry);
+            std::string seg;
+            while (std::getline(iss, seg)) {
+                if ((int)seg.size() <= colW)
+                    lines.push_back(seg);
+                else
+                    for (int pos = 0; pos < (int)seg.size(); pos += colW)
+                        lines.push_back(seg.substr(pos, colW));
+            }
+        }
+        return lines;
+    }
+
+    std::string buildBody(const std::vector<std::string> &sidebar,
+                          const std::vector<std::string> &main,
+                          int BODY_SIZE,
+                          int w,
+                          int sidebarW,
+                          bool rawMain                                      = false,
+                          const std::vector<std::vector<Line>> *mainColumns = nullptr,
+                          const std::vector<double> *percents               = nullptr,
+                          bool usePercentColumns                            = false) {
+
+        const int dividerW = sidebarW > 0 ? 1 : 0;
+        const int mainW    = w - sidebarW - dividerW;
+
+        std::vector<std::string> sideLines = expandLines(sidebar, sidebarW);
+        while ((int)sideLines.size() > BODY_SIZE)
+            sideLines.erase(sideLines.begin());
+
+        std::vector<std::string> mainLines;
+
+        if (mainColumns && usePercentColumns && percents) {
+            std::string rendered = services.render.printColumnsPercent(*mainColumns, *percents, 2, 0, mainW);
+            mainLines            = services.accountingPage.splitLines(rendered);
+        } else if (mainColumns) {
+            std::string rendered = services.render.printColumns(*mainColumns, 2, 0, mainW);
+            mainLines            = services.accountingPage.splitLines(rendered);
+        } else if (rawMain) {
+            mainLines = main;
+        } else {
+            mainLines = expandLines(main, mainW);
+        }
+
+        while ((int)mainLines.size() > BODY_SIZE)
+            mainLines.erase(mainLines.begin());
+
+        std::ostringstream out;
+        for (int i = 0; i < BODY_SIZE; ++i) {
+            const std::string &s = i < (int)sideLines.size() ? sideLines[i] : "";
+            const std::string &m = i < (int)mainLines.size() ? mainLines[i] : "";
+
+            if (sidebarW > 0) {
+                out << s << std::string(std::max(0, sidebarW - (int)s.size()), ' ');
+                out << '|';
+            }
+
+            if (rawMain || mainColumns)
+                out << ((int)m.size() > mainW ? m.substr(0, mainW) : m + std::string(std::max(0, mainW - (int)m.size()), ' '));
+            else
+                out << m << std::string(std::max(0, mainW - (int)m.size()), ' ');
+
+            out << "\033[K\n";
+        }
+        return out.str();
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Main -- CLASS 18
+//----------------------------------------------------------------------------------
+
+int main() {
+    WindowsUtilities windowsUtilities;
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    windowsUtilities.maximizeConsoleWindow();
+    SetConsoleTitle(TEXT("Jacquard's Loom"));
+#endif
+
+    ServicesUI services;
+    services.fileSystem.bootstrapGlobal();
+
+    // startup
+    UserInterface ui(services);
+    ui.startOnThread();
+    ui.join();
+
+    // shutdown
+    services.tradingLoop.stop();
+
+    return 0;
+}
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Main
+//----------------------------------------------------------------------------------
