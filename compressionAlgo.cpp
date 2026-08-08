@@ -110,12 +110,34 @@ void maximizeConsoleWindow() {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
+// Global Enums
+//----------------------------------------------------------------------------------
+
+enum class Align { LEFT, CENTER, RIGHT };
+
+enum class Page { COMPRESSOR };
+
+enum class InputMode { COMMAND };
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
 // Global Structs
 //----------------------------------------------------------------------------------
 
 struct Line {
     std::string text;
     Align alignment = Align::LEFT;
+};
+
+struct LogSession {
+    enum Stage { INCOME, EXPENSE } stage = INCOME;
+    std::vector<Entry> income;
+    std::vector<Entry> expenses;
+    double pendingAmount     = 0.0;
+    bool waitingForReason    = false;
+    bool waitingForNewReason = false;
+    std::vector<std::string> reasonHistory;
 };
 
 struct SymbolEntry {
@@ -570,6 +592,12 @@ class Functions {
     // FORMATTERS
     // =========================================================
 
+    // All integral types (int, long, long long, uint64_t, etc.)
+    template <typename T> static std::enable_if_t<std::is_integral_v<T>, std::string> format(T value) { return addCommas(std::to_string(value)); }
+
+    // Default: 2 decimal places
+    static std::string format(double value) { return formatFixed(value, 2); }
+
     // Inserts thousand separators into a numeric string
     static std::string addCommas(std::string s) {
         size_t dotPos = s.find('.');
@@ -686,6 +714,27 @@ class Functions {
         }
         return data;
     }
+
+    static std::string makeProgressBar(int current, int total, int width = 50) {
+        if (total <= 0)
+            total = 1;
+        double progress = std::clamp(static_cast<double>(current) / static_cast<double>(total), 0.0, 1.0);
+        int filled      = static_cast<int>(std::round(progress * width));
+        std::ostringstream oss;
+        oss << "[";
+        for (int i = 0; i < filled; ++i)
+            oss << "#";
+        for (int i = filled; i < width; ++i)
+            oss << " ";
+        oss << "] " << std::setw(3) << static_cast<int>(progress * 100) << "%";
+        return oss.str();
+    }
+
+    // Prints in-place using \r — call repeatedly to animate
+    static void printProgressBar(int current, int total, int width = 50) {
+        std::cout << '\r' << makeProgressBar(current, total, width);
+        std::cout.flush();
+    }
 };
 
 //----------------------------------------------------------------------------------
@@ -696,6 +745,11 @@ class Functions {
 
 class SystemClock {
   public:
+    inline long long getMilliseconds() {
+        auto now = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    }
+
     inline long long getNanoseconds() {
         auto now = std::chrono::high_resolution_clock::now();
         return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
@@ -3024,183 +3078,6 @@ class EncodingRouter {
         stats.utf8Ratio = stats.byteSize > 0 ? (double)stats.utf8Bytes / (double)stats.byteSize : 0.0;
 
         return stats;
-    }
-};
-
-//----------------------------------------------------------------------------------
-//----------------------------------------------------------------------------------
-//----------------------------------------------------------------------------------
-// Operations Result
-//----------------------------------------------------------------------------------
-
-class RiceEncoding {
-  public:
-    RiceHeader encode(const std::vector<uint8_t> &values) {
-
-        RiceHeader best;
-
-        if (values.empty())
-            return best;
-
-        size_t bestBits = SIZE_MAX;
-
-        for (uint8_t k = 0; k <= 15; ++k) {
-
-            std::string bits;
-
-            for (uint32_t value : values) {
-
-                uint32_t q = value >> k;
-                uint32_t r = value & ((1u << k) - 1);
-
-                // Unary quotient
-                bits.append(q, '1');
-                bits.push_back('0');
-
-                // Binary remainder
-                for (int i = k - 1; i >= 0; --i)
-                    bits.push_back(((r >> i) & 1) ? '1' : '0');
-            }
-
-            if (bits.size() < bestBits) {
-
-                bestBits = bits.size();
-
-                best.k           = k;
-                best.bitCount    = static_cast<uint32_t>(bits.size());
-                best.symbolCount = static_cast<uint32_t>(values.size());
-
-                best.payload.clear();
-
-                for (size_t i = 0; i < bits.size(); i += 8) {
-
-                    uint8_t byte = 0;
-
-                    for (size_t j = 0; j < 8 && (i + j) < bits.size(); ++j) {
-                        if (bits[i + j] == '1')
-                            byte |= (1 << (7 - j));
-                    }
-
-                    best.payload.push_back(byte);
-                }
-            }
-        }
-
-        //--------------------------------------------------------
-        // Serialize
-        //--------------------------------------------------------
-
-        best.serialisedPayload.clear();
-
-        best.serialisedPayload.push_back(best.k);
-
-        for (int i = 3; i >= 0; --i)
-            best.serialisedPayload.push_back(static_cast<uint8_t>((best.bitCount >> (i * 8)) & 0xFF));
-
-        for (int i = 3; i >= 0; --i)
-            best.serialisedPayload.push_back(static_cast<uint8_t>((best.symbolCount >> (i * 8)) & 0xFF));
-
-        best.serialisedPayload.insert(best.serialisedPayload.end(), best.payload.begin(), best.payload.end());
-
-        return best;
-    }
-
-    std::vector<uint8_t> decode(const RiceHeader &header) {
-
-        //--------------------------------------------------------
-        // Convert payload back to bits
-        //--------------------------------------------------------
-
-        std::string bits;
-        bits.reserve(header.bitCount);
-
-        for (uint8_t byte : header.payload) {
-
-            for (int i = 7; i >= 0; --i)
-                bits.push_back((byte & (1 << i)) ? '1' : '0');
-        }
-
-        bits.resize(header.bitCount);
-
-        //--------------------------------------------------------
-        // Decode
-        //--------------------------------------------------------
-
-        std::vector<uint8_t> values;
-
-        size_t pos = 0;
-
-        while (values.size() < header.symbolCount && pos < bits.size()) {
-
-            uint32_t q = 0;
-
-            while (pos < bits.size() && bits[pos] == '1') {
-
-                ++q;
-                ++pos;
-            }
-
-            if (pos >= bits.size())
-                break;
-
-            ++pos;
-
-            uint32_t r = 0;
-
-            for (uint8_t i = 0; i < header.k; ++i) {
-
-                if (pos >= bits.size())
-                    break;
-
-                r <<= 1;
-
-                if (bits[pos++] == '1')
-                    r |= 1;
-            }
-
-            values.push_back(static_cast<uint8_t>((q << header.k) | r));
-        }
-
-        return values;
-    }
-
-    RiceHeader deserialise(const std::vector<uint8_t> &buffer) {
-
-        RiceHeader header;
-
-        if (buffer.size() < 9)
-            return header;
-
-        size_t pos = 0;
-
-        header.k = buffer[pos++];
-
-        header.bitCount = 0;
-        for (int i = 0; i < 4; ++i)
-            header.bitCount = (header.bitCount << 8) | buffer[pos++];
-
-        header.symbolCount = 0;
-        for (int i = 0; i < 4; ++i)
-            header.symbolCount = (header.symbolCount << 8) | buffer[pos++];
-
-        header.payload.assign(buffer.begin() + pos, buffer.end());
-
-        header.serialisedPayload = buffer;
-
-        return header;
-    }
-
-    void print(const RiceHeader &r) {
-
-        std::cout << "========================================================================================================================\n";
-        std::cout << "RICE ENCODING\n";
-        std::cout << "========================================================================================================================\n";
-        std::cout << "Best k          : " << static_cast<int>(r.k) << "\n";
-        std::cout << "Symbol count    : " << r.symbolCount << "\n";
-        std::cout << "Encoded bits    : " << r.bitCount << "\n";
-        std::cout << "Payload bytes   : " << r.payload.size() << "\n";
-        std::cout << "Serialized size : " << r.serialisedPayload.size() * 8 << " bits\n";
-        std::cout << "========================================================================================================================\n";
     }
 };
 
@@ -5694,8 +5571,7 @@ struct UIState {
     Page previousPage = Page::HOME;
     InputMode mode    = InputMode::COMMAND;
 
-    LogSession logSession;
-    std::string activeLogDate;
+    // std::string activeLogDate;
 };
 
 //----------------------------------------------------------------------------------
