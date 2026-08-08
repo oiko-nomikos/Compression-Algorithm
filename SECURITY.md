@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in the Oikos Random Number Generator, please report it responsibly.
+If you discover a security vulnerability in Oikos Compression Algorithm, please report it responsibly.
 
 Please **do not** disclose security vulnerabilities publicly until they have been reviewed and, where appropriate, fixed.
 
