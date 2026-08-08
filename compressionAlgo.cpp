@@ -5688,6 +5688,110 @@ class CompressionPage {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
+// Binary Entropy Pool -- CLASS 7
+//----------------------------------------------------------------------------------
+
+class Output {
+  public:
+    explicit Output(Services &services, Commands &cmds, TradingLoop &tradingLoop)
+        : services(services)
+        , commands(cmds)
+        , tradingLoop(tradingLoop) {}
+
+    std::string buildBar(int w = 0) {
+        if (w <= 0)
+            w = services.render.consoleWidth();
+        return std::string(w, '=') + "\033[K\n";
+    }
+
+    std::string buildHeader(int iterationCount, double fps) {
+        std::vector<Line> row1a, row1b, row1c;
+        std::vector<Line> row2a, row2b, row2c;
+
+        uint64_t currentPrice = tradingLoop.getCurrentPrice();
+
+        row1a.emplace_back("BTC" /*services.enumFuncs.buildCurrencyPair(market.key.pair)*/, Align::CENTER);
+        row1b.emplace_back("--- " + commands.pageName() + " ---", Align::CENTER);
+        row1c.emplace_back(/*services.enumFuncs.exchangeToString(market.key.exchange)*/ " EXCHANGE", Align::CENTER);
+
+        row2a.emplace_back("Iteration: " + std::to_string(iterationCount) + "  FPS: " + std::to_string((int)fps), Align::CENTER);
+        row2b.emplace_back("Price: $" + formatPrice(currentPrice), Align::CENTER);
+        row2c.emplace_back("Date: " + services.systemClock.getCurrentTime(), Align::CENTER);
+
+        std::ostringstream out;
+        out << buildBar();
+        out << services.render.printHeaderColumns({row1a, row1b, row1c});
+        out << buildBar();
+        out << services.render.printHeaderColumns({row2a, row2b, row2c});
+        out << buildBar();
+        return out.str();
+    }
+
+    std::string buildCommandLine(const std::string &input, int w) {
+        std::ostringstream out;
+        out << std::string(w, '=') << "\033[K\n";
+        out << "[>] Command Line: " << input << "_\033[K\n";
+        return out.str();
+    }
+
+    std::string buildFooter(const std::string &userName, const std::string &loginTime, const std::string &lastLoginTime) {
+        Side side = tradingLoop.getTradeDecision();
+        std::vector<Line> f1, f2, f3, f4, f5;
+
+        f1.emplace_back("User: " + userName, Align::CENTER);
+        f2.emplace_back("Login time: " + loginTime, Align::CENTER);
+        f3.emplace_back("Last login: " + lastLoginTime, Align::CENTER);
+        f4.emplace_back("Direction: " + services.enumFuncs.tradeTypeToString(side), Align::CENTER);
+        f5.emplace_back(std::string("Version: ") + CLIENT_VERSION, Align::CENTER);
+
+        std::ostringstream out;
+        out << buildBar();
+        out << services.render.printFooterColumns({f1, f2, f3, f4, f5});
+        out << buildBar();
+        return out.str();
+    }
+
+    std::string buildPageHome(int w) {
+        std::ostringstream out;
+
+        auto center = [&](const std::string &txt) {
+            if (txt.empty())
+                return std::string("\n");
+            int pad = std::max(0, (w - (int)txt.size()) / 2);
+            return std::string(pad, ' ') + txt + "\n";
+        };
+
+        out << center("=== TRADE TERMINAL ===");
+        out << center("");
+        out << center("PAGES");
+        out << center("");
+        out << center("/compression");
+        out << center("");
+        out << center("COMMANDS");
+        out << center("");
+        out << center("/back");
+
+        out << center("");
+        out << center("Type any command starting with / to navigate.");
+
+        return out.str();
+    }
+
+  private:
+    Services &services;
+    Commands &commands;
+    TradingLoop &tradingLoop;
+
+    static std::string formatPrice(uint64_t cents) {
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(2) << (static_cast<double>(cents) / 100.0);
+        return ss.str();
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
 // Main -- CLASS 18
 //----------------------------------------------------------------------------------
 
@@ -5712,10 +5816,10 @@ struct ServicesUI {
     // Pages
     CompressionPage compressionPage;
 
-    , databaseCommands(fileSystem), commands(services, compressionCommands)
-
-                                        ,
-        compressionState(), compressionPage(), compressionCommands(compressionState, servicesCompression, compression), databasePage(fileSystem) {}
+    ServicesUI {
+        , databaseCommands(fileSystem), commands(services, compressionCommands), compressionState(), compressionPage(),
+            compressionCommands(compressionState, servicesCompression, compression), databasePage(fileSystem) {}
+    }
 };
 
 //----------------------------------------------------------------------------------
@@ -5841,8 +5945,9 @@ class UserInterface {
 
                 // ── Frame-rate cap ────────────────────────────────────────────────
                 auto renderElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - frameStart);
-                if (renderElapsed < FRAME_TIME)
+                if (renderElapsed < FRAME_TIME) {
                     std::this_thread::sleep_for(FRAME_TIME - renderElapsed);
+                }
             }
 
             windowsUtilities.showCursor();
@@ -5851,117 +5956,118 @@ class UserInterface {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             std::cout.flush();
         }
-
-      private:
-        ServicesUI & services;
-        WindowsUtilities windowsUtilities;
-        std::thread uiThread;
-
-        std::vector<std::string> body;
-        std::vector<std::string> cmdLog;
-
-        std::vector<std::string> expandLines(const std::vector<std::string> &entries, int colW) {
-            std::vector<std::string> lines;
-            for (const auto &entry : entries) {
-                std::istringstream iss(entry);
-                std::string seg;
-                while (std::getline(iss, seg)) {
-                    if ((int)seg.size() <= colW)
-                        lines.push_back(seg);
-                    else
-                        for (int pos = 0; pos < (int)seg.size(); pos += colW)
-                            lines.push_back(seg.substr(pos, colW));
-                }
-            }
-            return lines;
-        }
-
-        std::string buildBody(const std::vector<std::string> &sidebar,
-                              const std::vector<std::string> &main,
-                              int BODY_SIZE,
-                              int w,
-                              int sidebarW,
-                              bool rawMain                                      = false,
-                              const std::vector<std::vector<Line>> *mainColumns = nullptr,
-                              const std::vector<double> *percents               = nullptr,
-                              bool usePercentColumns                            = false) {
-
-            const int dividerW = sidebarW > 0 ? 1 : 0;
-            const int mainW    = w - sidebarW - dividerW;
-
-            std::vector<std::string> sideLines = expandLines(sidebar, sidebarW);
-            while ((int)sideLines.size() > BODY_SIZE)
-                sideLines.erase(sideLines.begin());
-
-            std::vector<std::string> mainLines;
-
-            if (mainColumns && usePercentColumns && percents) {
-                std::string rendered = services.render.printColumnsPercent(*mainColumns, *percents, 2, 0, mainW);
-                mainLines            = services.accountingPage.splitLines(rendered);
-            } else if (mainColumns) {
-                std::string rendered = services.render.printColumns(*mainColumns, 2, 0, mainW);
-                mainLines            = services.accountingPage.splitLines(rendered);
-            } else if (rawMain) {
-                mainLines = main;
-            } else {
-                mainLines = expandLines(main, mainW);
-            }
-
-            while ((int)mainLines.size() > BODY_SIZE)
-                mainLines.erase(mainLines.begin());
-
-            std::ostringstream out;
-            for (int i = 0; i < BODY_SIZE; ++i) {
-                const std::string &s = i < (int)sideLines.size() ? sideLines[i] : "";
-                const std::string &m = i < (int)mainLines.size() ? mainLines[i] : "";
-
-                if (sidebarW > 0) {
-                    out << s << std::string(std::max(0, sidebarW - (int)s.size()), ' ');
-                    out << '|';
-                }
-
-                if (rawMain || mainColumns)
-                    out << ((int)m.size() > mainW ? m.substr(0, mainW) : m + std::string(std::max(0, mainW - (int)m.size()), ' '));
-                else
-                    out << m << std::string(std::max(0, mainW - (int)m.size()), ' ');
-
-                out << "\033[K\n";
-            }
-            return out.str();
-        }
-    };
-
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    // Main -- CLASS 18
-    //----------------------------------------------------------------------------------
-
-    int main() {
-        WindowsUtilities windowsUtilities;
-#ifdef _WIN32
-        SetConsoleOutputCP(CP_UTF8);
-        SetConsoleCP(CP_UTF8);
-        windowsUtilities.maximizeConsoleWindow();
-        SetConsoleTitle(TEXT("Jacquard's Loom"));
-#endif
-
-        ServicesUI services;
-        services.fileSystem.bootstrapGlobal();
-
-        // startup
-        UserInterface ui(services);
-        ui.startOnThread();
-        ui.join();
-
-        // shutdown
-        services.tradingLoop.stop();
-
-        return 0;
     }
 
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    //----------------------------------------------------------------------------------
-    // Main
-    //----------------------------------------------------------------------------------
+  private:
+    ServicesUI &services;
+    WindowsUtilities windowsUtilities;
+    std::thread uiThread;
+
+    std::vector<std::string> body;
+    std::vector<std::string> cmdLog;
+
+    std::vector<std::string> expandLines(const std::vector<std::string> &entries, int colW) {
+        std::vector<std::string> lines;
+        for (const auto &entry : entries) {
+            std::istringstream iss(entry);
+            std::string seg;
+            while (std::getline(iss, seg)) {
+                if ((int)seg.size() <= colW)
+                    lines.push_back(seg);
+                else
+                    for (int pos = 0; pos < (int)seg.size(); pos += colW)
+                        lines.push_back(seg.substr(pos, colW));
+            }
+        }
+        return lines;
+    }
+
+    std::string buildBody(const std::vector<std::string> &sidebar,
+                          const std::vector<std::string> &main,
+                          int BODY_SIZE,
+                          int w,
+                          int sidebarW,
+                          bool rawMain                                      = false,
+                          const std::vector<std::vector<Line>> *mainColumns = nullptr,
+                          const std::vector<double> *percents               = nullptr,
+                          bool usePercentColumns                            = false) {
+
+        const int dividerW = sidebarW > 0 ? 1 : 0;
+        const int mainW    = w - sidebarW - dividerW;
+
+        std::vector<std::string> sideLines = expandLines(sidebar, sidebarW);
+        while ((int)sideLines.size() > BODY_SIZE)
+            sideLines.erase(sideLines.begin());
+
+        std::vector<std::string> mainLines;
+
+        if (mainColumns && usePercentColumns && percents) {
+            std::string rendered = services.render.printColumnsPercent(*mainColumns, *percents, 2, 0, mainW);
+            mainLines            = services.accountingPage.splitLines(rendered);
+        } else if (mainColumns) {
+            std::string rendered = services.render.printColumns(*mainColumns, 2, 0, mainW);
+            mainLines            = services.accountingPage.splitLines(rendered);
+        } else if (rawMain) {
+            mainLines = main;
+        } else {
+            mainLines = expandLines(main, mainW);
+        }
+
+        while ((int)mainLines.size() > BODY_SIZE)
+            mainLines.erase(mainLines.begin());
+
+        std::ostringstream out;
+        for (int i = 0; i < BODY_SIZE; ++i) {
+            const std::string &s = i < (int)sideLines.size() ? sideLines[i] : "";
+            const std::string &m = i < (int)mainLines.size() ? mainLines[i] : "";
+
+            if (sidebarW > 0) {
+                out << s << std::string(std::max(0, sidebarW - (int)s.size()), ' ');
+                out << '|';
+            }
+
+            if (rawMain || mainColumns)
+                out << ((int)m.size() > mainW ? m.substr(0, mainW) : m + std::string(std::max(0, mainW - (int)m.size()), ' '));
+            else
+                out << m << std::string(std::max(0, mainW - (int)m.size()), ' ');
+
+            out << "\033[K\n";
+        }
+        return out.str();
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Main -- CLASS 18
+//----------------------------------------------------------------------------------
+
+int main() {
+    WindowsUtilities windowsUtilities;
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    windowsUtilities.maximizeConsoleWindow();
+    SetConsoleTitle(TEXT("Jacquard's Loom"));
+#endif
+
+    ServicesUI services;
+    services.fileSystem.bootstrapGlobal();
+
+    // startup
+    UserInterface ui(services);
+    ui.startOnThread();
+    ui.join();
+
+    // shutdown
+    services.tradingLoop.stop();
+
+    return 0;
+}
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+// Main
+//----------------------------------------------------------------------------------
