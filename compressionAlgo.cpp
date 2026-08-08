@@ -115,7 +115,7 @@ void maximizeConsoleWindow() {
 
 enum class Align { LEFT, CENTER, RIGHT };
 
-enum class Page { COMPRESSOR };
+enum class Page { HOME, COMPRESSOR };
 
 enum class InputMode { COMMAND };
 
@@ -128,16 +128,6 @@ enum class InputMode { COMMAND };
 struct Line {
     std::string text;
     Align alignment = Align::LEFT;
-};
-
-struct LogSession {
-    enum Stage { INCOME, EXPENSE } stage = INCOME;
-    std::vector<Entry> income;
-    std::vector<Entry> expenses;
-    double pendingAmount     = 0.0;
-    bool waitingForReason    = false;
-    bool waitingForNewReason = false;
-    std::vector<std::string> reasonHistory;
 };
 
 struct SymbolEntry {
@@ -5424,6 +5414,196 @@ class Compression {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
+// Prompt Input -- CLASS 1
+//----------------------------------------------------------------------------------
+
+class PromptInput {
+  public:
+    struct InputRules {
+        size_t minLength = 0;
+        size_t maxLength = 64;
+
+        bool allowEmpty       = false;
+        bool asciiOnly        = false;
+        bool numbersOnly      = false;
+        bool noWhitespace     = false;
+        bool allowSymbols     = true;
+        bool alphanumericOnly = false;
+        bool decimalOnly      = false;
+    };
+
+    static bool validate(const std::string &input, const InputRules &rules, std::string &outError) {
+        if (!rules.allowEmpty && input.empty()) {
+            outError = "Input cannot be empty";
+            return false;
+        }
+        if (input.size() < rules.minLength) {
+            outError = "Minimum length: " + std::to_string(rules.minLength);
+            return false;
+        }
+        if (input.size() > rules.maxLength) {
+            outError = "Maximum length: " + std::to_string(rules.maxLength);
+            return false;
+        }
+
+        if (rules.asciiOnly)
+            for (unsigned char c : input)
+                if (c > 127) {
+                    outError = "ASCII characters only";
+                    return false;
+                }
+
+        if (rules.numbersOnly)
+            for (unsigned char c : input)
+                if (!std::isdigit(c)) {
+                    outError = "Numbers only";
+                    return false;
+                }
+
+        if (rules.alphanumericOnly)
+            for (unsigned char c : input)
+                if (!std::isalnum(c)) {
+                    outError = "Letters and numbers only";
+                    return false;
+                }
+
+        if (rules.noWhitespace)
+            for (unsigned char c : input)
+                if (std::isspace(c)) {
+                    outError = "No whitespace allowed";
+                    return false;
+                }
+
+        if (!rules.allowSymbols)
+            for (unsigned char c : input)
+                if (!std::isalnum(c) && !std::isspace(c)) {
+                    outError = "Symbols not allowed";
+                    return false;
+                }
+
+        if (rules.decimalOnly) {
+            bool hasDot = false;
+            for (int i = 0; i < (int)input.size(); i++) {
+                char c = input[i];
+                if (c == '-' && i == 0)
+                    continue; // allow leading minus
+                if (c == '.' && !hasDot) {
+                    hasDot = true;
+                    continue;
+                } // allow one dot
+                if (!std::isdigit((unsigned char)c)) {
+                    outError = "Numbers only (decimal allowed)";
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // =========================================================
+    // RULES
+    // =========================================================
+
+    static InputRules rules_password() {
+        InputRules r;
+        r.minLength    = 8;
+        r.maxLength    = 64;
+        r.allowEmpty   = false;
+        r.noWhitespace = true;
+        r.allowSymbols = true;
+        return r;
+    }
+
+    static InputRules rules_username() {
+        InputRules r;
+        r.minLength        = 3;
+        r.maxLength        = 32;
+        r.allowEmpty       = false;
+        r.noWhitespace     = true;
+        r.alphanumericOnly = true;
+        return r;
+    }
+
+    // call after rules_password passes
+    static bool passwordStrength(const std::string &input, std::string &outError) {
+        bool hasLetter = false, hasDigit = false, hasSymbol = false;
+        for (unsigned char c : input) {
+            if (std::isalpha(c))
+                hasLetter = true;
+            if (std::isdigit(c))
+                hasDigit = true;
+            if (!std::isalnum(c) && !std::isspace(c))
+                hasSymbol = true;
+        }
+        if (!hasLetter) {
+            outError = "Password must contain a letter";
+            return false;
+        }
+        if (!hasDigit) {
+            outError = "Password must contain a number";
+            return false;
+        }
+        if (!hasSymbol) {
+            outError = "Password must contain a symbol";
+            return false;
+        }
+        return true;
+    }
+
+    static InputRules rules_command() {
+        InputRules r;
+        r.maxLength    = 64;
+        r.allowEmpty   = true;
+        r.allowSymbols = true;
+        return r;
+    }
+
+    static InputRules rules_amount() {
+        InputRules r;
+        r.maxLength    = 16;
+        r.allowEmpty   = false;
+        r.noWhitespace = true;
+        r.decimalOnly  = true;
+        return r;
+    }
+
+    static InputRules rules_filename() {
+        InputRules r;
+        r.maxLength        = 32;
+        r.noWhitespace     = true;
+        r.alphanumericOnly = true;
+        return r;
+    }
+
+    static InputRules rules_label() {
+        InputRules r;
+        r.maxLength    = 48;
+        r.allowEmpty   = false;
+        r.allowSymbols = true;
+        return r;
+    }
+
+    static InputRules rules_selection() {
+        InputRules r;
+        r.maxLength   = 4;
+        r.allowEmpty  = false;
+        r.numbersOnly = true;
+        return r;
+    }
+
+    static InputRules rules_month() {
+        InputRules r;
+        r.maxLength        = 12;
+        r.allowEmpty       = false;
+        r.alphanumericOnly = true;
+        return r;
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
 // File System -- CLASS 1
 //----------------------------------------------------------------------------------
 
@@ -5582,9 +5762,8 @@ struct UIState {
 
 class Commands {
   public:
-    Commands(Services &services, UIState &uiState)
-        : services(services)
-        , uiState(uiState) {}
+    Commands(UIState &uiState)
+        : uiState(uiState) {}
 
     bool isTrading() const { return tradeCommands.isRunning(); }
 
@@ -5675,7 +5854,6 @@ class Commands {
     }
 
   private:
-    Services &services;
     CompressionCommands &compressionCommands;
     UIState &uiState;
 
@@ -6126,7 +6304,7 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
     windowsUtilities.maximizeConsoleWindow();
-    SetConsoleTitle(TEXT("Jacquard's Loom"));
+    SetConsoleTitle(TEXT("Compression Algorithm"));
 #endif
 
     ServicesUI services;
