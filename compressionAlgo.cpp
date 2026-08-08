@@ -97,15 +97,83 @@ using Bytes = std::vector<uint8_t>;
 // Windows Specific Utilities
 //----------------------------------------------------------------------------------
 
-void maximizeConsoleWindow() {
+class WindowsUtilities {
+  public:
+    void showCursor() {
 #ifdef _WIN32
-    HWND consoleWindow = GetConsoleWindow();
-
-    if (consoleWindow != nullptr) {
-        ShowWindow(consoleWindow, SW_MAXIMIZE);
-    }
+        HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_CURSOR_INFO info;
+        info.dwSize   = 100;
+        info.bVisible = TRUE;
+        SetConsoleCursorInfo(hConsole, &info);
 #endif
-}
+    }
+
+    static inline int getConsoleWidth() {
+#ifdef _WIN32
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+
+            return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        }
+
+        return 80; // fallback width
+#else
+        return 80;
+#endif
+    }
+
+    void maximizeConsoleWindow() {
+#ifdef _WIN32
+        HWND consoleWindow = GetConsoleWindow();
+
+        if (consoleWindow != nullptr) {
+            ShowWindow(consoleWindow, SW_MAXIMIZE);
+        }
+#endif
+    }
+
+    void hideCursor() {
+#ifdef _WIN32
+        HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_CURSOR_INFO info;
+        info.dwSize   = 100;
+        info.bVisible = FALSE;
+        SetConsoleCursorInfo(hConsole, &info);
+#endif
+    }
+
+    bool enableAnsiEscapes() {
+#ifdef _WIN32
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode  = 0;
+
+        if (!GetConsoleMode(hOut, &mode))
+            return false;
+
+        mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        return SetConsoleMode(hOut, mode) != 0;
+#else
+        return true;
+#endif
+    }
+
+    void fitBufferToWindow() {
+#ifdef _WIN32
+        // Remove horizontal scrollbar only — don't touch buffer height
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        GetConsoleScreenBufferInfo(hOut, &csbi);
+
+        int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+
+        // Only shrink buffer width to window width, leave height alone
+        COORD bufferSize = {(SHORT)w, csbi.dwSize.Y};
+        SetConsoleScreenBufferSize(hOut, bufferSize);
+#endif
+    }
+};
 
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
@@ -743,6 +811,20 @@ class SystemClock {
     inline long long getNanoseconds() {
         auto now = std::chrono::high_resolution_clock::now();
         return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    }
+
+    // =========================================================
+    // FORMATTED TIME STRINGS
+    // =========================================================
+
+    // Current local time as "YYYY-MM-DD HH:MM:SS.mmm"
+    std::string getCurrentTime() {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+        std::ostringstream ss;
+        ss << std::put_time(std::localtime(&tt), "%Y-%m-%d %H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms.count();
+        return ss.str();
     }
 };
 
@@ -5765,8 +5847,6 @@ class Commands {
     Commands(UIState &uiState)
         : uiState(uiState) {}
 
-    bool isTrading() const { return tradeCommands.isRunning(); }
-
     void navigate(Page page, std::vector<std::string> &cmdLog, const std::string &arg = "") {
         if (page != uiState.currentPage)
             uiState.previousPage = uiState.currentPage;
@@ -5794,10 +5874,6 @@ class Commands {
         // ── Compression has its own numeric menu, not slash commands ───
         if (uiState.currentPage == Page::COMPRESSOR)
             return compressionCommands.handle(input, cmdLog);
-
-        // ── Config intercepts when mid-flow (entering API keys etc) ───
-        if (configCommands.handle(input, cmdLog))
-            return true;
 
         // ── General input validation ───────────────────────────────────
         if (uiState.mode == InputMode::COMMAND) {
@@ -5948,14 +6024,13 @@ class CompressionPage {
 
 class Output {
   public:
-    explicit Output(Services &services, Commands &cmds, TradingLoop &tradingLoop)
-        : services(services)
-        , commands(cmds)
+    explicit Output(Commands &cmds, TradingLoop &tradingLoop)
+        : commands(cmds)
         , tradingLoop(tradingLoop) {}
 
     std::string buildBar(int w = 0) {
         if (w <= 0)
-            w = services.render.consoleWidth();
+            w = render.consoleWidth();
         return std::string(w, '=') + "\033[K\n";
     }
 
@@ -5963,21 +6038,19 @@ class Output {
         std::vector<Line> row1a, row1b, row1c;
         std::vector<Line> row2a, row2b, row2c;
 
-        uint64_t currentPrice = tradingLoop.getCurrentPrice();
-
         row1a.emplace_back("BTC" /*services.enumFuncs.buildCurrencyPair(market.key.pair)*/, Align::CENTER);
         row1b.emplace_back("--- " + commands.pageName() + " ---", Align::CENTER);
         row1c.emplace_back(/*services.enumFuncs.exchangeToString(market.key.exchange)*/ " EXCHANGE", Align::CENTER);
 
         row2a.emplace_back("Iteration: " + std::to_string(iterationCount) + "  FPS: " + std::to_string((int)fps), Align::CENTER);
         row2b.emplace_back("Price: $" + formatPrice(currentPrice), Align::CENTER);
-        row2c.emplace_back("Date: " + services.systemClock.getCurrentTime(), Align::CENTER);
+        row2c.emplace_back("Date: " + systemClock.getCurrentTime(), Align::CENTER);
 
         std::ostringstream out;
         out << buildBar();
-        out << services.render.printHeaderColumns({row1a, row1b, row1c});
+        out << render.printHeaderColumns({row1a, row1b, row1c});
         out << buildBar();
-        out << services.render.printHeaderColumns({row2a, row2b, row2c});
+        out << render.printHeaderColumns({row2a, row2b, row2c});
         out << buildBar();
         return out.str();
     }
@@ -5990,18 +6063,18 @@ class Output {
     }
 
     std::string buildFooter(const std::string &userName, const std::string &loginTime, const std::string &lastLoginTime) {
-        Side side = tradingLoop.getTradeDecision();
+        // Side side = tradingLoop.getTradeDecision();
         std::vector<Line> f1, f2, f3, f4, f5;
 
         f1.emplace_back("User: " + userName, Align::CENTER);
         f2.emplace_back("Login time: " + loginTime, Align::CENTER);
         f3.emplace_back("Last login: " + lastLoginTime, Align::CENTER);
-        f4.emplace_back("Direction: " + services.enumFuncs.tradeTypeToString(side), Align::CENTER);
+        f4.emplace_back("Direction: " /*+ enumFuncs.tradeTypeToString(side)*/, Align::CENTER);
         f5.emplace_back(std::string("Version: ") + CLIENT_VERSION, Align::CENTER);
 
         std::ostringstream out;
         out << buildBar();
-        out << services.render.printFooterColumns({f1, f2, f3, f4, f5});
+        out << render.printFooterColumns({f1, f2, f3, f4, f5});
         out << buildBar();
         return out.str();
     }
@@ -6033,9 +6106,7 @@ class Output {
     }
 
   private:
-    Services &services;
     Commands &commands;
-    TradingLoop &tradingLoop;
 
     static std::string formatPrice(uint64_t cents) {
         std::ostringstream ss;
@@ -6063,7 +6134,7 @@ struct ServicesUI {
     Compression compression;
 
     // UI command handlers
-    DatabaseCommands databaseCommands;
+    // DatabaseCommands databaseCommands;
     CompressionCommands compressionCommands;
     Commands commands;
     Output output;
@@ -6071,10 +6142,13 @@ struct ServicesUI {
     // Pages
     CompressionPage compressionPage;
 
-    ServicesUI {
-        , databaseCommands(fileSystem), commands(services, compressionCommands), compressionState(), compressionPage(),
-            compressionCommands(compressionState, servicesCompression, compression), databasePage(fileSystem) {}
-    }
+    ServicesUI()
+        : databaseCommands(fileSystem)
+        , commands(services, compressionCommands)
+        , compressionState()
+        , compressionPage()
+        , compressionCommands(compressionState, servicesCompression, compression)
+        , databasePage(fileSystem) {}
 };
 
 //----------------------------------------------------------------------------------
