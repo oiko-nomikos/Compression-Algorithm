@@ -1,0 +1,38 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+UseTab: Never
+ColumnLimit: 180
+
+# Keep LLVM brace style
+BreakBeforeBraces: Attach
+
+# Force function bodies onto multiple lines
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortBlocksOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: Inline
+
+# Force if/for/while onto multiple lines
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Constructor formatting
+BreakConstructorInitializersBeforeComma: true
+ConstructorInitializerIndentWidth: 4
+PackConstructorInitializers: Never
+
+# Parameter formatting
+BinPackParameters: false
+BinPackArguments: false
+
+# Includes
+SortIncludes: false
+
+# Preserve spacing
+KeepEmptyLinesAtTheStartOfBlocks: true
+
+# Alignment
+AlignConsecutiveAssignments: true
+AlignOperands: Align
+BreakBeforeBinaryOperators: NonAssignment
+
+AllowShortCaseLabelsOnASingleLine: false
