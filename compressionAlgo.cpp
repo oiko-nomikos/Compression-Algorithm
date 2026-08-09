@@ -1,86 +1,85 @@
-
-
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 // Standard Library — I/O and String Handling
 //----------------------------------------------------------------------------------
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <sstream>
-#include <string>
+#include <fstream>  // file stream read/write (keys.db, xor.db, README, etc.)
+#include <iomanip>  // stream formatting (setw, setprecision, hex)
+#include <iostream> // console I/O
+#include <sstream>  // string streams for parsing/building output
+#include <string>   // std::string
 
 //----------------------------------------------------------------------------------
 // Standard Library — Containers
 //----------------------------------------------------------------------------------
-#include <algorithm>
-#include <array>
-#include <bitset>
-#include <deque>
-#include <map>
-#include <queue>
-#include <set>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <vector>
+#include <algorithm>     // sort, find, transform, etc.
+#include <array>         // fixed-size arrays (ring buffers, hash state)
+#include <bitset>        // fixed-width bit sequences
+#include <deque>         // double-ended queue
+#include <map>           // ordered key/value store
+#include <optional>      // nullable return values
+#include <queue>         // FIFO queue (order queue, command queue)
+#include <set>           // ordered unique elements
+#include <unordered_map> // hash map
+#include <unordered_set> // hash set
+#include <utility>       // std::pair, std::move, std::swap
+#include <vector>        // dynamic array
 
 //----------------------------------------------------------------------------------
 // Standard Library — Numerics and Math
 //----------------------------------------------------------------------------------
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <ctime>
-#include <random>
+#include <cmath>   // math functions (used in NIST test suite, FFT, etc.)
+#include <cstdint> // fixed-width integer types (uint8_t, uint64_t, ...)
+#include <cstdlib> // general utilities (rand, exit, strtol)
+#include <ctime>   // time_t, timing utilities
+#include <random>  // std::mt19937 and friends (non-cryptographic RNG needs)
 
 //----------------------------------------------------------------------------------
 // Standard Library — Memory and Characters
 //----------------------------------------------------------------------------------
-#include <cctype>
-#include <cstdio>
-#include <cstring>
-#include <locale>
+#include <cctype>  // character classification (isalpha, isdigit, ...)
+#include <cstdio>  // C-style I/O (snprintf, etc.)
+#include <cstring> // C-style string/memory ops (memcpy, memset)
+#include <locale>  // locale-aware formatting
 
 //----------------------------------------------------------------------------------
 // Standard Library — Multithreading
 //----------------------------------------------------------------------------------
-#include <atomic>
-#include <condition_variable>
-#include <functional>
-#include <future>
-#include <mutex>
-#include <shared_mutex>
-#include <thread>
+#include <atomic>             // std::atomic (uiRunning, thread-safe flags)
+#include <condition_variable> // thread signalling
+#include <functional>         // std::function (callbacks, command dispatch)
+#include <future>             // std::future/async
+#include <mutex>              // mutual exclusion locks
+#include <shared_mutex>       // reader/writer locks
+#include <thread>             // std::thread (UI thread, trading loop thread)
 
 //----------------------------------------------------------------------------------
 // Standard Library — Time
 //----------------------------------------------------------------------------------
-#include <chrono>
+#include <chrono> // durations, clocks, frame timing
 
 //----------------------------------------------------------------------------------
 // Standard Library — Exceptions and Utilities
 //----------------------------------------------------------------------------------
-#include <stdexcept>
+#include <stdexcept> // std::runtime_error, std::invalid_argument, ...
 
 //----------------------------------------------------------------------------------
 // Standard Library — File System
 //----------------------------------------------------------------------------------
-#include <filesystem>
-
-#include <optional>
+#include <filesystem> // path handling, per-user file layout (FileSystem class)
 
 //----------------------------------------------------------------------------------
-// Windows
+// Windows — Console, Input, and OS APIs
 //----------------------------------------------------------------------------------
 #ifdef _WIN32
-#include <windows.h>
+#include <windows.h> // ANSI escape enabling, console buffer sizing, VirtualLock
+#include <conio.h>   // _kbhit / _getch — raw keyboard input for the UI loop
 #endif
 
 //----------------------------------------------------------------------------------
 // Type Aliases
 //----------------------------------------------------------------------------------
+
 using Bytes = std::vector<uint8_t>;
 
 //----------------------------------------------------------------------------------
@@ -5842,8 +5841,6 @@ struct UIState {
     Page currentPage  = Page::HOME;
     Page previousPage = Page::HOME;
     InputMode mode    = InputMode::COMMAND;
-
-    // std::string activeLogDate;
 };
 
 //----------------------------------------------------------------------------------
@@ -5854,8 +5851,9 @@ struct UIState {
 
 class Commands {
   public:
-    Commands(UIState &uiState)
-        : uiState(uiState) {}
+    Commands(UIState &uiState, CompressionCommands &compressionCommands)
+        : uiState(uiState)
+        , compressionCommands(compressionCommands) {}
 
     void navigate(Page page, std::vector<std::string> &cmdLog, const std::string &arg = "") {
         if (page != uiState.currentPage)
@@ -6044,22 +6042,19 @@ class Output {
     }
 
     std::string buildHeader(int iterationCount, double fps) {
-        std::vector<Line> row1a, row1b, row1c;
-        std::vector<Line> row2a, row2b, row2c;
+        std::vector<Line> row1a;
+        std::vector<Line> row2a, row2b;
 
-        row1a.emplace_back("BTC" /*services.enumFuncs.buildCurrencyPair(market.key.pair)*/, Align::CENTER);
-        row1b.emplace_back("--- " + commands.pageName() + " ---", Align::CENTER);
-        row1c.emplace_back(/*services.enumFuncs.exchangeToString(market.key.exchange)*/ " EXCHANGE", Align::CENTER);
+        row1a.emplace_back("--- " + commands.pageName() + " ---", Align::CENTER);
 
         row2a.emplace_back("Iteration: " + std::to_string(iterationCount) + "  FPS: " + std::to_string((int)fps), Align::CENTER);
-        row2b.emplace_back("Price: $" + formatPrice(currentPrice), Align::CENTER);
-        row2c.emplace_back("Date: " + systemClock.getCurrentTime(), Align::CENTER);
+        row2b.emplace_back("Date: " + systemClock.getCurrentTime(), Align::CENTER);
 
         std::ostringstream out;
         out << buildBar();
-        out << render.printHeaderColumns({row1a, row1b, row1c});
+        out << render.printHeaderColumns({row1a});
         out << buildBar();
-        out << render.printHeaderColumns({row2a, row2b, row2c});
+        out << render.printHeaderColumns({row2a, row2b});
         out << buildBar();
         return out.str();
     }
@@ -6130,6 +6125,9 @@ class Output {
 struct ServicesUI {
     // main utilities
     Render render;
+    Functions functions{};
+    BinaryEntropyPool bep{};
+    GenerateUUID uuidGen{};
 
     // Compression algorithms
     CompressionState compressionState{};
@@ -6154,10 +6152,21 @@ struct ServicesUI {
     UIState uiState;
 
     ServicesUI()
-        : commands(compressionCommands)
+        : render()
         , compressionState()
+        , operations()
+        , textEncoding()
+        , compressionDatabase()
+        , xorCypher()
+        , encodingRouter()
+        , layeredCompression(compressionState)
+        , servicesCompression{compressionState, functions, bep, operations, layeredCompression, textEncoding, compressionDatabase, xorCypher, uuidGen, encodingRouter}
+        , compression(servicesCompression)
+        , compressionCommands(compressionState, servicesCompression, compression)
+        , commands(uiState, compressionCommands)
+        , output(commands)
         , compressionPage()
-        , compressionCommands(compressionState, servicesCompression, compression) {}
+        , uiState() {}
 };
 
 //----------------------------------------------------------------------------------
