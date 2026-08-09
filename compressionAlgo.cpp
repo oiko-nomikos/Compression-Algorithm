@@ -86,10 +86,10 @@ using Bytes = std::vector<uint8_t>;
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Version
+// Macros: Version
 //----------------------------------------------------------------------------------
 
-#define CLIENT_VERSION "v0.1.0"
+#define CLIENT_VERSION "0.1.0"
 
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
@@ -193,6 +193,18 @@ enum class InputMode { COMMAND };
 // Global Structs
 //----------------------------------------------------------------------------------
 
+struct ConsoleSize {
+    int width;
+    int height;
+};
+
+ConsoleSize getConsoleSize() {
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+
+    return {csbi.srWindow.Right - csbi.srWindow.Left + 1, csbi.srWindow.Bottom - csbi.srWindow.Top + 1};
+}
+
 struct Line {
     std::string text;
     Align alignment = Align::LEFT;
@@ -271,7 +283,7 @@ struct TransitionStream {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Global Struct for Compression Algorithm
 //----------------------------------------------------------------------------------
 
 struct CompressionState {
@@ -411,7 +423,7 @@ class FileSystem {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Functions
+// Render
 //----------------------------------------------------------------------------------
 
 class Render {
@@ -608,7 +620,7 @@ class Render {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// File System -- CLASS 1
+// Functions
 //----------------------------------------------------------------------------------
 
 class Functions {
@@ -1110,7 +1122,7 @@ class SHA256 {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Random Number Generator -- CLASS 6
+// Secure Memory
 //----------------------------------------------------------------------------------
 
 // wrapper around platform-specific "pin memory, prevent swap" calls.
@@ -1138,7 +1150,7 @@ class SecureMemory {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Random Number Generator -- CLASS 6
+// Random Number Generator
 //----------------------------------------------------------------------------------
 
 class RandomNumberGenerator {
@@ -1283,7 +1295,7 @@ class RandomNumberGenerator {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Random Number Generator -- CLASS 6
+// Binary Entropy Pool
 //----------------------------------------------------------------------------------
 
 class BinaryEntropyPool {
@@ -3172,7 +3184,7 @@ struct OperationsResult {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Binary Entropy Pool
+// Operations
 //----------------------------------------------------------------------------------
 
 class Operations {
@@ -3974,7 +3986,7 @@ class Printer {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Order Functions
 //----------------------------------------------------------------------------------
 
 class OrderFunctions {
@@ -4077,7 +4089,7 @@ class OrderFunctions {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Block Data
 //----------------------------------------------------------------------------------
 
 class BlockData {
@@ -4178,7 +4190,7 @@ class BlockData {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Variable Width Headers
 //----------------------------------------------------------------------------------
 
 class VariableWidthHeader {
@@ -4268,7 +4280,7 @@ class VariableWidthHeader {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Order Header
 //----------------------------------------------------------------------------------
 
 class OrderHeader {
@@ -4288,7 +4300,7 @@ class OrderHeader {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Order Body
 //----------------------------------------------------------------------------------
 
 class OrderBody {
@@ -4368,10 +4380,8 @@ class OrderBody {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Order Footer
 //----------------------------------------------------------------------------------
-
-// Footer:    (8152 bits):
 
 class OrderFooter {
   public:
@@ -4450,7 +4460,7 @@ class OrderFooter {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Layered Sections
 //----------------------------------------------------------------------------------
 
 struct LayerSections {
@@ -4463,7 +4473,7 @@ struct LayerSections {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Layered Compression
+// Recursive Encoding
 //----------------------------------------------------------------------------------
 
 class RecursiveEncoding {
@@ -5496,7 +5506,7 @@ class Compression {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Prompt Input -- CLASS 1
+// Prompt Input
 //----------------------------------------------------------------------------------
 
 class PromptInput {
@@ -5686,7 +5696,7 @@ class PromptInput {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// File System -- CLASS 1
+// Compression Commands
 //----------------------------------------------------------------------------------
 
 class CompressionCommands {
@@ -5825,7 +5835,7 @@ class CompressionCommands {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// File System -- CLASS 1
+// UI State
 //----------------------------------------------------------------------------------
 
 struct UIState {
@@ -5839,7 +5849,7 @@ struct UIState {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// File System -- CLASS 1
+// Commands
 //----------------------------------------------------------------------------------
 
 class Commands {
@@ -5943,7 +5953,7 @@ class Commands {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Main -- CLASS 18
+// Compression Page
 //----------------------------------------------------------------------------------
 
 class CompressionPage {
@@ -6019,14 +6029,13 @@ class CompressionPage {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Binary Entropy Pool -- CLASS 7
+// Output
 //----------------------------------------------------------------------------------
 
 class Output {
   public:
-    explicit Output(Commands &cmds, TradingLoop &tradingLoop)
-        : commands(cmds)
-        , tradingLoop(tradingLoop) {}
+    explicit Output(Commands &cmds)
+        : commands(cmds) {}
 
     std::string buildBar(int w = 0) {
         if (w <= 0)
@@ -6062,19 +6071,14 @@ class Output {
         return out.str();
     }
 
-    std::string buildFooter(const std::string &userName, const std::string &loginTime, const std::string &lastLoginTime) {
-        // Side side = tradingLoop.getTradeDecision();
-        std::vector<Line> f1, f2, f3, f4, f5;
+    std::string buildFooter() {
+        std::vector<Line> f1;
 
-        f1.emplace_back("User: " + userName, Align::CENTER);
-        f2.emplace_back("Login time: " + loginTime, Align::CENTER);
-        f3.emplace_back("Last login: " + lastLoginTime, Align::CENTER);
-        f4.emplace_back("Direction: " /*+ enumFuncs.tradeTypeToString(side)*/, Align::CENTER);
-        f5.emplace_back(std::string("Version: ") + CLIENT_VERSION, Align::CENTER);
+        f1.emplace_back(std::string("Version: ") + CLIENT_VERSION, Align::CENTER);
 
         std::ostringstream out;
         out << buildBar();
-        out << render.printFooterColumns({f1, f2, f3, f4, f5});
+        out << render.printFooterColumns({f1});
         out << buildBar();
         return out.str();
     }
@@ -6107,6 +6111,8 @@ class Output {
 
   private:
     Commands &commands;
+    Render render;
+    SystemClock systemClock;
 
     static std::string formatPrice(uint64_t cents) {
         std::ostringstream ss;
@@ -6118,10 +6124,13 @@ class Output {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Main -- CLASS 18
+// Services UI
 //----------------------------------------------------------------------------------
 
 struct ServicesUI {
+    // main utilities
+    Render render;
+
     // Compression algorithms
     CompressionState compressionState{};
     Operations operations{};
@@ -6134,7 +6143,6 @@ struct ServicesUI {
     Compression compression;
 
     // UI command handlers
-    // DatabaseCommands databaseCommands;
     CompressionCommands compressionCommands;
     Commands commands;
     Output output;
@@ -6142,19 +6150,20 @@ struct ServicesUI {
     // Pages
     CompressionPage compressionPage;
 
+    std::atomic<bool> uiRunning{true};
+    UIState uiState;
+
     ServicesUI()
-        : databaseCommands(fileSystem)
-        , commands(services, compressionCommands)
+        : commands(compressionCommands)
         , compressionState()
         , compressionPage()
-        , compressionCommands(compressionState, servicesCompression, compression)
-        , databasePage(fileSystem) {}
+        , compressionCommands(compressionState, servicesCompression, compression) {}
 };
 
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Main -- CLASS 18
+// User Interface
 //----------------------------------------------------------------------------------
 
 class UserInterface {
@@ -6210,8 +6219,6 @@ class UserInterface {
                         if (commandInput == "/exit" || commandInput == "/quit") {
                             cmdLog.push_back("[<] Shutting down...");
                             services.uiRunning.store(false, std::memory_order_release);
-                            services.tradingLoop.setTrading(false);
-                            services.encryptedFileSystem.lock();
                             std::this_thread::sleep_for(std::chrono::seconds(2));
                             commandInput.clear();
                             continue;
@@ -6263,7 +6270,7 @@ class UserInterface {
                 }
 
                 frame << services.output.buildCommandLine(commandInput, W);
-                frame << services.output.buildFooter(services.authPage.pendingUsername, services.authPage.loginTime, services.authPage.lastLoginTime);
+                frame << services.output.buildFooter();
 
                 std::string frameText = frame.str();
                 if (!frameText.empty() && frameText.back() == '\n')
@@ -6332,10 +6339,8 @@ class UserInterface {
 
         if (mainColumns && usePercentColumns && percents) {
             std::string rendered = services.render.printColumnsPercent(*mainColumns, *percents, 2, 0, mainW);
-            mainLines            = services.accountingPage.splitLines(rendered);
         } else if (mainColumns) {
             std::string rendered = services.render.printColumns(*mainColumns, 2, 0, mainW);
-            mainLines            = services.accountingPage.splitLines(rendered);
         } else if (rawMain) {
             mainLines = main;
         } else {
@@ -6369,7 +6374,7 @@ class UserInterface {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
-// Main -- CLASS 18
+// Main
 //----------------------------------------------------------------------------------
 
 int main() {
@@ -6382,15 +6387,11 @@ int main() {
 #endif
 
     ServicesUI services;
-    services.fileSystem.bootstrapGlobal();
 
     // startup
     UserInterface ui(services);
     ui.startOnThread();
     ui.join();
-
-    // shutdown
-    services.tradingLoop.stop();
 
     return 0;
 }
